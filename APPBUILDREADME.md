@@ -114,14 +114,20 @@ No neural networks, no hidden weights, and zero guessing.
 * **Configurable Safety Stock:**
   - *Option A:* Fixed Days of Safety Stock (e.g., 14 days of coverage).
   - *Option B:* Fixed Unit Floor (e.g., maintain at least 25 units).
+* **Executive Summary Cards (Top Dashboard Metrics):**
+  - **Items Below Reorder Point:** Instant count of SKUs needing replenishment with action-required indicators.
+  - **Total Shortage Units:** Aggregated deficit units across all items, factoring supplier case-pack roundings.
+  - **Estimated Order Cost:** Clear, merchant-friendly pre-tax projection of capital needed for restock.
+  - **Cash Tied Up (Overstock):** Explicit dollar amount trapped in items exceeding a healthy 90-day runway.
+* **Overstock & Runway Management:**
+  - Quick-filter tabs in the Polaris `IndexTable` for "All", "Needs Reorder", "Overstocked", and "Stock OK".
+  - Dedicated warnings identifying dead cash trapped in slow-moving inventory.
 * **"Show The Math" Inspection Modal:**
-  - Interactive Polaris modal displaying:
-    - Total units sold in the selected window.
-    - Active daily sales rate: $\text{Units Sold} / \text{Window Days}$.
-    - Effective supplier lead time in days.
-    - Safety stock buffer calculation.
-    - Available stock vs. incoming purchase orders.
-    - Final rounding applied due to MOQ or box case sizes.
+  - Interactive Polaris modal presenting clear, jargon-free audit steps for every buying recommendation:
+    - **Step 1: Reorder Point (ROP) Formula** (tagged *Industry Standard*).
+    - **Step 2: Prevent Double-Ordering** by deducting open incoming POs to compute **Net Shortage**.
+    - **Step 3: Supplier MOQs & Case Pack Auto-Rounding** with plain-English **Rounding Logic** (e.g., `"147 units rounded up to the next multiple of 24"`).
+    - Overstock warnings displaying days of runway and locked cash value when stock exceeds 90 days.
 
 ### 3. Supplier Constraints & Rule Optimization
 * **Vendor Master Catalog:** Manage vendors with default contacts, currency, payment terms, and baseline lead times.
@@ -134,7 +140,7 @@ No neural networks, no hidden weights, and zero guessing.
   - **Pack Size (Case Pack / Inner Pack):** Forces calculations to round up to the nearest valid container multiple (e.g., box of 12 or master carton of 48).
 
 ### 4. Purchase Order (PO) Lifecycle & Receiving
-* **One-Click Draft Generation:** Automatically convert all SKUs below their reorder point into a grouped Draft PO per supplier.
+* **One-Click Draft Generation:** Automatically convert selected SKUs below their reorder point into a grouped Draft PO per supplier via Polaris `useIndexResourceState`.
 * **Spreadsheet-Style Interactive Editor:**
   - Fast inline keyboard navigation to adjust order quantities.
   - Live subtotal, weight/unit totals, and variance indicators.
@@ -145,8 +151,10 @@ No neural networks, no hidden weights, and zero guessing.
 
 ### 5. Self-Service Data Healing ("The Heal Button")
 * **The Problem It Solves:** If a webhook fails during high-traffic spikes (e.g., Black Friday), legacy apps leave merchants in the dark for days.
-* **The Solution:** A dedicated **"Recalculate Recent Sales"** button in the ClearStock dashboard:
-  - Triggers a targeted, lightweight GraphQL query for the last 7 or 14 days of paid orders.
+* **The Solution:** A dedicated **"Heal Data"** button prominently exposed in the top action bar:
+  - Positioned directly beside the primary "Create PO from Selected" button (no hidden dropdown).
+  - Wrapped with an informative tooltip (*"Instantly re-syncs recent paid orders from Shopify to verify local sales counts."*).
+  - Triggers a targeted, lightweight GraphQL query for recent paid orders.
   - Compares and reconciles `DailySalesAggregator` locally within 5 to 10 seconds.
   - Gives merchants 100% autonomy without needing to submit customer support tickets.
 
@@ -778,7 +786,7 @@ Keep these 4 crucial technical nuances in mind when writing code and implementin
 - [ ] Run `npx prisma migrate dev` to establish the database schema (including `ProcessedWebhook`).
 - [ ] Implement the `BigInt.prototype.toJSON` polyfill in `entry.server.tsx`.
 - [ ] Ensure product sync populates both `variantId` and `inventoryItemId`.
-- [ ] Implement the **"Recalculate Recent Sales"** (Heal Button) endpoint in your dashboard route.
+- [ ] Implement the **"Heal Data"** (Recalculate Recent Sales) endpoint and button in your dashboard route.
 - [ ] Launch `npm run dev` and select your target development store.
 - [ ] Verify test orders populate `DailySalesAggregator` through the webhook queue (confirming `paid` status filtering and idempotency).
 - [ ] Open the replenishment dashboard and click **"Show The Math"** on any item to verify calculations!
