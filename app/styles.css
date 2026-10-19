@@ -1,0 +1,111 @@
+/* ==========================================================================
+   ClearStock Inventory & POs - Universal IndexTable Normalization
+   Prevents columns from collapsing or overlapping across all screens.
+   ========================================================================== */
+
+/* 1. Global Reset: Disable buggy Polaris sticky positioning by default */
+.Polaris-IndexTable__TableCell,
+.Polaris-IndexTable__TableHeading,
+.Polaris-IndexTable__TableCell--first,
+.Polaris-IndexTable__TableCell--first + .Polaris-IndexTable__TableCell,
+.Polaris-IndexTable__TableHeading--first,
+.Polaris-IndexTable__TableHeading--second,
+.Polaris-IndexTable__Table--sticky .Polaris-IndexTable__TableCell,
+.Polaris-IndexTable__Table--sticky .Polaris-IndexTable__TableHeading,
+.Polaris-IndexTable__StickyTable .Polaris-IndexTable__TableCell,
+.Polaris-IndexTable__StickyTable .Polaris-IndexTable__TableHeading {
+  position: static !important;
+  left: auto !important;
+  box-shadow: none !important;
+}
+
+/* 2. Hide Polaris ghost duplicate sticky header */
+.Polaris-IndexTable__StickyTableHeader {
+  display: none !important;
+}
+
+/* 3. Global Natural Layout & Clean Spacing for All Tables */
+.Polaris-IndexTable__Table {
+  table-layout: auto !important;
+  width: 100% !important;
+}
+
+.Polaris-IndexTable__TableHeading {
+  white-space: nowrap !important;
+  padding: 12px 16px !important;
+  text-overflow: clip !important;
+  vertical-align: middle !important;
+}
+
+.Polaris-IndexTable__TableCell {
+  white-space: nowrap !important;
+  padding: 12px 16px !important;
+  vertical-align: middle !important;
+}
+
+.Polaris-IndexTable__TableRow {
+  border-bottom: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
+}
+
+/* ==========================================================================
+   Opt-in Pinned Columns (Only applied when .clearstock-sticky-table is used)
+   Used specifically on the Replenishment dashboard with checkboxes.
+   ========================================================================== */
+
+/* Pinned Checkbox Column (Column 1) */
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading:first-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading--first,
+.clearstock-sticky-table .Polaris-IndexTable__TableCell:first-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableCell--first {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 25 !important;
+  background-color: var(--p-color-bg-surface, #ffffff) !important;
+  width: 48px !important;
+  min-width: 48px !important;
+  max-width: 48px !important;
+}
+
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading:first-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading--first {
+  z-index: 26 !important;
+  background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
+}
+
+/* Pinned Product Column (Column 2) */
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading:nth-child(2),
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading--second,
+.clearstock-sticky-table .Polaris-IndexTable__TableCell:nth-child(2),
+.clearstock-sticky-table .Polaris-IndexTable__TableCell--first + .Polaris-IndexTable__TableCell {
+  position: sticky !important;
+  left: 48px !important;
+  z-index: 23 !important;
+  background-color: var(--p-color-bg-surface, #ffffff) !important;
+  min-width: 260px !important;
+  box-shadow: 3px 0 5px -2px rgba(0, 0, 0, 0.12) !important;
+  border-right: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
+}
+
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading:nth-child(2),
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading--second {
+  z-index: 24 !important;
+  background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
+}
+
+/* Pinned Row Highlights */
+.clearstock-sticky-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:first-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:nth-child(2),
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:first-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:nth-child(2) {
+  background-color: var(--p-color-bg-surface-hover, #f1f2f3) !important;
+}
+
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:first-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:nth-child(2) {
+  background-color: var(--p-color-bg-surface-selected, #f2f7fe) !important;
+}
+
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:first-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:nth-child(2) {
+  background-color: var(--p-color-bg-surface-brand-hover, #eaf2fd) !important;
+}
