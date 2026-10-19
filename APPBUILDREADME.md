@@ -8,18 +8,21 @@
 ## Table of Contents
 
 1. [App Overview & Core Philosophy ("The Why")](#1-app-overview--core-philosophy-the-why)
-   - [Market Problem & Opportunity](#market-problem--opportunity)
-   - [Target Audience](#target-audience)
+   - [Market Problem & Opportunity (The Inventory Planner by Sage Breakdown)](#market-problem--opportunity-the-inventory-planner-by-sage-breakdown)
+   - [Competitive Moat: Sage vs. ClearStock](#competitive-moat-sage-vs-clearstock)
+   - [Target Audience: The Stocky & Sage Refugees](#target-audience-the-stocky--sage-refugees)
    - [The "Show The Math" Principle](#the-show-the-math-principle)
 2. [Key Features & Specifications ("The What")](#2-key-features--specifications-the-what)
    - [1. Data Ingestion & Resilient Syncing](#1-data-ingestion--resilient-syncing)
    - [2. Deterministic Replenishment Engine](#2-deterministic-replenishment-engine)
    - [3. Supplier Constraints & Rule Optimization](#3-supplier-constraints--rule-optimization)
    - [4. Purchase Order (PO) Lifecycle & Receiving](#4-purchase-order-po-lifecycle--receiving)
+   - [5. Self-Service Data Healing ("The Heal Button")](#5-self-service-data-healing-the-heal-button)
    - [MVP Scope Boundaries (In-Scope vs. Out-of-Scope)](#mvp-scope-boundaries-in-scope-vs-out-of-scope)
 3. [System Architecture & Tech Stack](#3-system-architecture--tech-stack)
    - [Architecture Diagram](#architecture-diagram)
    - [Technology Stack Matrix](#technology-stack-matrix)
+   - [Shopify-First Sync Resilience (Avoiding the Multi-Channel Sync Trap)](#shopify-first-sync-resilience-avoiding-the-multi-channel-sync-trap)
    - [Shopify Rate Limiting Strategy](#shopify-rate-limiting-strategy)
 4. [Database Schema (Prisma ORM)](#4-database-schema-prisma-orm)
    - [Schema Definition (`schema.prisma`)](#schema-definition-schemaprisma)
@@ -27,7 +30,7 @@
 5. [Webhook & Queue Configuration Checklist](#5-webhook--queue-configuration-checklist)
    - [Required OAuth Scopes](#required-oauth-scopes)
    - [Webhook Subscriptions](#webhook-subscriptions)
-   - [Worker Processing & Idempotency](#worker-processing--idempotency)
+   - [Worker Processing & Bulletproof Idempotency](#worker-processing--bulletproof-idempotency)
 6. [Local Development Setup](#6-local-development-setup)
    - [Prerequisites](#prerequisites)
    - [Environment Variables (`.env`)](#environment-variables-env)
@@ -36,6 +39,7 @@
    - [Tunneling (Cloudflare / ngrok)](#tunneling-cloudflare--ngrok)
 7. [Shopify GraphQL Reference Patterns](#7-shopify-graphql-reference-patterns)
    - [Initial Historical Sync (`bulkOperationRunQuery`)](#initial-historical-sync-bulkoperationrunquery)
+   - [On-Demand Self-Service Healing Query](#on-demand-self-service-healing-query)
    - [Stock Receiving Mutation (`inventoryAdjustQuantities`)](#stock-receiving-mutation-inventoryadjustquantities)
 8. [Implementation Nuances & Technical "Gotchas"](#8-implementation-nuances--technical-gotchas)
    - [1. Variant GID vs. InventoryItem GID Mapping](#1-variant-gid-vs-inventoryitem-gid-mapping)
@@ -47,17 +51,38 @@
 
 ## 1. App Overview & Core Philosophy ("The Why")
 
-### Market Problem & Opportunity
-Small-to-midsize Shopify merchants face an acute inventory management crisis:
-1. **The Deprecation of Shopify Stocky:** Thousands of merchants built their ordering habits around Stocky, which is being retired or restricted.
-2. **The "Black Box AI" Trap:** Modern replenishment software (e.g., Inventory Planner by Sage) has pivoted heavily toward complex machine learning algorithms, opaque neural-network predictions, and exorbitant monthly fees ($300–$1,000+/mo).
-3. **Loss of Merchant Trust:** When an "AI" engine advises a merchant to purchase 850 units of a seasonal SKU without detailing *why*, merchants hesitate. When the forecast fails, they suffer stockouts or warehouse bloat with dead stock.
+### Market Problem & Opportunity (The Inventory Planner by Sage Breakdown)
 
-### Target Audience
-- Direct-to-Consumer (DTC) and omnichannel merchants doing **$500K to $15M GMV** on Shopify.
-- Merchants with 50 to 5,000 active SKUs and physical supplier lead times between 7 and 90 days.
-- Former Stocky power users demanding speed, simplicity, and predictable purchase order generation.
-- Operators who prefer clear statistical heuristics and verifiable math over "predictive AI".
+Inventory management for growing Shopify merchants is fundamentally broken. An analysis of merchant reviews for category incumbents like **Inventory Planner by Sage** reveals acute market frustration:
+
+1. **Extortionate, Predatory Contracts:** Incumbents force merchants into **$4,000+ upfront annual commitments** with pricing pegged directly to merchant gross revenue. As merchants scale, they are financially penalized. When features or integrations break, refunds are routinely denied.
+2. **Abandoning the Small-to-Midsize Merchant:** Incumbents are actively turning away or pricing out merchants doing under $1M in annual GMV.
+3. **The 10-Week Onboarding Nightmare:** Legacy tools have become bloated with complex accounting connectors and opaque predictive models that take months to configure and train.
+4. **Fragile Sync Architecture (The 21-Day Outage):** By attempting to maintain bi-directional synchronization across Shopify, Amazon, QuickBooks, Xero, and 3PL warehouses simultaneously, incumbent sync pipelines frequently collapse. A single breaking API change in QuickBooks halts inventory updates across the entire system for weeks.
+5. **The Deprecation of Stocky:** Thousands of merchants reliant on Shopify's deprecated Stocky app are stranded between abandoned legacy software and overpriced enterprise bloat.
+
+---
+
+### Competitive Moat: Sage vs. ClearStock
+
+| Strategic Dimension | Inventory Planner by Sage | ClearStock Inventory & POs |
+| :--- | :--- | :--- |
+| **Pricing Model** | $4,000+/yr upfront, revenue-tied tiers, rigid lock-in | **Flat-rate monthly** by SKU tier ($39 / $79 / $149/mo). Cancel anytime. |
+| **Target Customer** | $1M–$50M+ enterprises | **$100K–$15M DTC & omnichannel merchants** (Stocky & Sage refugees). |
+| **Onboarding Time** | 8 to 10 weeks of calls and configuration | **15 minutes:** Install $\rightarrow$ 2-minute bulk sync $\rightarrow$ Set lead times $\rightarrow$ Generate PO. |
+| **Forecasting Engine** | Black-box machine learning & opaque statistical curves | **100% Deterministic:** Simple, verifiable math with "Show the Math" transparency. |
+| **Integrations** | Fragile web of 3PLs, QuickBooks, Xero, EDI, and Amazon | **Shopify-First:** Shopify is the single source of truth. Zero sync conflicts. |
+| **Self-Healing** | Support tickets with weeks of turnaround time | **1-Click "Heal" Button:** Merchant can re-sync the last 7–30 days instantly from the UI. |
+
+---
+
+### Target Audience: The Stocky & Sage Refugees
+- Shopify merchants generating **$100K to $15M GMV**.
+- Stores with **50 to 5,000 active SKUs** that require disciplined, periodic purchase orders.
+- Lean operations teams who value operational clarity over complex algorithmic forecasts.
+- Merchants who want native Shopify admin performance without paying a percentage of their revenue.
+
+---
 
 ### The "Show The Math" Principle
 **ClearStock is built as the uncompromising "Anti-AI" inventory manager.** 
@@ -118,6 +143,13 @@ No neural networks, no hidden weights, and zero guessing.
   - Mark line items as partially received or fully received.
   - Directly commits additions to Shopify using the `inventoryAdjustQuantities` GraphQL mutation with clear audit reference strings.
 
+### 5. Self-Service Data Healing ("The Heal Button")
+* **The Problem It Solves:** If a webhook fails during high-traffic spikes (e.g., Black Friday), legacy apps leave merchants in the dark for days.
+* **The Solution:** A dedicated **"Recalculate Recent Sales"** button in the ClearStock dashboard:
+  - Triggers a targeted, lightweight GraphQL query for the last 7 or 14 days of paid orders.
+  - Compares and reconciles `DailySalesAggregator` locally within 5 to 10 seconds.
+  - Gives merchants 100% autonomy without needing to submit customer support tickets.
+
 ---
 
 ### MVP Scope Boundaries (In-Scope vs. Out-of-Scope)
@@ -129,6 +161,7 @@ To guarantee high velocity, operational stability, and sub-second performance, t
 | **Locations** | Single Primary Location (Shopify primary location) | Multi-location cross-docking & store rebalancing | Multi-location transfers introduce complex graph routing and stock allocation logic. |
 | **Product Structure** | Standard Single & Multi-Variant SKUs | Bundles, Assemblies, Kits, and Bill of Materials (BOM) | BOM requires recursive explosion and component-level tracking. |
 | **Forecasting Logic** | Deterministic rolling-window ADS + Lead Time math | Prophet, ARIMA, Machine Learning, Seasonal AI curves | Contradicts the "anti-AI", explainable core value proposition. |
+| **Integrations** | **Shopify Admin API Only** | QuickBooks, Xero, ShipStation, 3PLs, Amazon | Prevents multi-channel sync breakdowns that cripple legacy incumbents. |
 | **Financials** | Unit cost tracking, total PO cost tally | Complex cash flow forecasting, multi-currency hedging | Keeps focus locked on physical replenishment execution. |
 | **PO Data Sync** | Local ClearStock PO engine with exportable PDF/CSV | Dual-way sync into Shopify Native PO admin screens | Prevents dual-sync race conditions and API schema conflicts. |
 
@@ -151,6 +184,7 @@ flowchart TD
         AuthHandler[Shopify App Authentication]
         MathEngine[Deterministic Replenishment Engine]
         PDFGen[PDF & CSV Export Engine]
+        HealEngine[Self-Service Reconciliation Engine]
     end
 
     subgraph Async Processing & Database
@@ -162,13 +196,17 @@ flowchart TD
     AdminUI <--> RemixLoader
     AuthHandler <--> ShopifyGQL
     ShopifyWH -->|orders, inventory, products| RemixLoader
-    RemixLoader -->|Enqueue Webhook Job| RedisQueue
+    RemixLoader -->|1. Instant 200 OK & Enqueue Job| RedisQueue
     RedisQueue --> Worker
-    Worker -->|Write Aggregated Sales & Stock| PostgreSQL
+    Worker -->|2. Check Idempotency & Write Aggregates| PostgreSQL
 
     RemixLoader --> MathEngine
     MathEngine <--> PostgreSQL
     MathEngine --> AdminUI
+
+    AdminUI -->|Click 'Heal / Recalculate'| HealEngine
+    HealEngine -->|Targeted 7-Day Query| ShopifyGQL
+    HealEngine -->|Reconcile Aggregates| PostgreSQL
 
     RemixLoader -->|Receive PO: inventoryAdjustQuantities| ShopifyGQL
     RemixLoader --> PDFGen
@@ -179,9 +217,22 @@ flowchart TD
 * **Application Framework:** [Shopify App Template for Remix](https://shopify.dev/docs/apps/templates/remix) (Node.js >= 22, React 18, React Router 7 v7 engine).
 * **Database & ORM:** PostgreSQL managed via [Prisma ORM](https://www.prisma.io/).
 * **UI Design System:** `@shopify/polaris` (v12+) and `@shopify/app-bridge-react` (v4+) for pixel-perfect Shopify Admin integration.
-* **Background Queues & Workers:** Redis with **BullMQ** (or Inngest) for background webhook digestion, historical bulk imports, and nightly sales rollups.
+* **Background Queues & Workers:** Redis with **BullMQ** for background webhook digestion, historical bulk imports, and nightly sales rollups.
 * **Shopify API Version:** Admin GraphQL API (2025-01 or later).
 * **Document Rendering:** `@react-pdf/renderer` or `pdfkit` for generating purchase orders.
+
+---
+
+### Shopify-First Sync Resilience (Avoiding the Multi-Channel Sync Trap)
+Why did Inventory Planner's sync break for 21+ days? Because they attempt to act as the bi-directional master database for QuickBooks, Amazon, Xero, and Shopify simultaneously. When any third-party accounting schema updates, their entire pipeline freezes.
+
+**ClearStock avoids this failure mode with four architectural pillars:**
+1. **Shopify is the Single Source of Truth:** We never fight Shopify for state. Inventory quantities, catalog metadata, and sales originate in Shopify. We calculate replenishment recommendations and write back receipts via standard Shopify APIs.
+2. **Instant Webhook Ingestion (`< 200ms`):** Routes never process order math synchronously. The route immediately returns `HTTP 200` to Shopify and pushes the event to BullMQ.
+3. **Strict Idempotency Table:** Every webhook record is keyed by `X-Shopify-Webhook-Id`. If Shopify fires a duplicate webhook, it is detected and ignored.
+4. **Self-Healing Architecture:** The merchant can manually recalibrate any time range with one click via the GraphQL Reconciliation Engine.
+
+---
 
 ### Shopify Rate Limiting Strategy
 Querying historical sales across all products via standard GraphQL queries during a page load will immediately trigger Shopify `429 Too Many Requests` errors or consume standard GraphQL bucket points (maximum 1,000 points/sec).
@@ -189,7 +240,7 @@ Querying historical sales across all products via standard GraphQL queries durin
 ClearStock bypasses this constraint:
 1. **Zero Runtime Order Queries:** The replenishment screen *never* queries Shopify order endpoints at render time.
 2. **Local Aggregate Ledger:** Daily sales are summarized inside PostgreSQL (`DailySalesAggregator`). Evaluating 90-day ADS across 1,000 SKUs executes as a single SQL `SUM()` query with an index on `[variantId, date]`.
-3. **Targeted Mutations Only:** Outbound Shopify API calls are limited to app installation (`bulkOperationRunQuery`) and PO fulfillment receiving (`inventoryAdjustQuantities`).
+3. **Targeted Mutations Only:** Outbound Shopify API calls are limited to app installation (`bulkOperationRunQuery`), on-demand healing, and PO fulfillment receiving (`inventoryAdjustQuantities`).
 
 ---
 
@@ -348,7 +399,20 @@ model DailySalesAggregator {
 }
 
 // ---------------------------------------------------------
-// 6. Bulk Ingestion Tracker
+// 6. Webhook Idempotency Ledger (Prevents Double Counting)
+// ---------------------------------------------------------
+model ProcessedWebhook {
+  id        String   @id // Stores the X-Shopify-Webhook-Id header
+  shop      String
+  topic     String
+  orderId   String?  // Shopify Order GID or numeric ID if applicable
+  createdAt DateTime @default(now())
+
+  @@index([shop, topic])
+}
+
+// ---------------------------------------------------------
+// 7. Bulk Ingestion & Reconciliation Tracker
 // ---------------------------------------------------------
 enum SyncStatus {
   PENDING
@@ -358,14 +422,15 @@ enum SyncStatus {
 }
 
 model HistoricalSyncJob {
-  id              String     @id @default(uuid())
-  shop            String
-  bulkOperationId String?
-  status          SyncStatus @default(PENDING)
-  totalDays       Int        @default(90)
-  errorMessage    String?
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
+  id               String     @id @default(uuid())
+  shop             String
+  bulkOperationId   String?
+  status           SyncStatus @default(PENDING)
+  totalDays        Int        @default(90)
+  errorMessage     String?
+  lastReconciledAt DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 
   @@index([shop])
 }
@@ -380,9 +445,8 @@ model HistoricalSyncJob {
     AND "variantId" = :variantId 
     AND "date" >= NOW() - INTERVAL '30 days';
   ```
-* **`inventoryItemId` in `VariantSupplierRule` and `PurchaseOrderItem`:** Preserving the `inventoryItemId` alongside `variantId` eliminates the need for expensive runtime queries during the PO receiving workflow.
-* **`VariantSupplierRule`:** Contains unique constraints per variant to prevent duplicate supplier mappings for the single-location MVP.
-* **`PurchaseOrder` & `PurchaseOrderItem`:** Preserves an exact ledger of historical costs and received unit counts independent of live Shopify product price edits.
+* **`ProcessedWebhook`:** Guarantees absolute deduplication. Before processing an `orders/create` or `orders/updated` job, the worker checks if `ProcessedWebhook.findUnique({ where: { id: webhookId } })` exists. If yes, it aborts immediately.
+* **`inventoryItemId` in Rules and Line Items:** Eliminates runtime resolution queries when executing PO receiving.
 
 ---
 
@@ -411,10 +475,10 @@ Ensure the following webhooks are declared in `shopify.app.toml` or registered d
 | `app/uninstalled` | `/webhooks/app/uninstalled` | Clean up sessions and pause scheduled worker tasks. |
 | `app/scopes_update` | `/webhooks/app/scopes_update` | Refresh and re-authenticate scopes if requirements change. |
 
-### Worker Processing & Idempotency
-1. **Fast Webhook Acknowledgment:** Webhook endpoints must respond with HTTP `200 OK` in **< 2000ms** to avoid Shopify retries. Endpoints simply push the raw payload to BullMQ / Redis.
-2. **Idempotency Header:** Use the Shopify-provided header `X-Shopify-Webhook-Id` as the job ID in Redis to automatically deduplicate re-delivered webhooks.
-3. **Queue Failure Strategy:** Retry failed jobs up to 3 times with exponential backoff before sending them to a Dead Letter Queue (DLQ).
+### Worker Processing & Bulletproof Idempotency
+1. **Immediate HTTP Response:** Route responds with `HTTP 200 OK` in `< 200ms`, dropping the payload directly into Redis.
+2. **Idempotency Verification:** Worker checks `ProcessedWebhook` table using `X-Shopify-Webhook-Id`. If already seen, the job completes with no action.
+3. **Atomic Upsert:** Updates to `DailySalesAggregator` execute via atomic SQL upsert (`ON CONFLICT (shop, "variantId", date) DO UPDATE SET "unitsSold" = "unitsSold" + :delta`).
 
 ---
 
@@ -556,7 +620,50 @@ export function buildHistoricalBulkOperationQuery(daysToBackfill = 90) {
 }
 ```
 
-When the bulk operation webhook (`bulk_operations/finish`) fires, stream the `.jsonl` result file into the worker to populate `DailySalesAggregator`.
+---
+
+### On-Demand Self-Service Healing Query
+Triggered when a merchant clicks the **"Recalculate Recent Sales"** button to self-heal any sync discrepancies for the last $N$ days without contacting support:
+
+```typescript
+export async function reconcileRecentSales(admin: any, shop: string, days = 14) {
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - days);
+  const formattedDate = cutoffDate.toISOString().split("T")[0];
+
+  const response = await admin.graphql(`
+    #graphql
+    query FetchRecentOrders($query: String!) {
+      orders(first: 250, query: $query) {
+        edges {
+          node {
+            id
+            createdAt
+            lineItems(first: 50) {
+              edges {
+                node {
+                  variant {
+                    id
+                  }
+                  quantity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `, {
+    variables: {
+      query: `created_at:>='${formattedDate}' financial_status:paid status:open,closed`
+    }
+  });
+
+  const data = await response.json();
+  // Worker rapidly compares and overwrites DailySalesAggregator rows for the date window
+  return data;
+}
+```
 
 ---
 
@@ -634,7 +741,8 @@ Keep these 4 crucial technical nuances in mind when writing code and implementin
 * **The Nuance:** Hardcoded query strings (e.g., `created_at:>='2026-01-01'`) will pull progressively larger datasets as time goes on, causing slow initial syncs or hitting bulk operation memory limits.
 * **Implementation Rule:** Always dynamically calculate the ISO date string:
   ```typescript
-  const dateOffset = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const msIn90Days = 90 * 24 * 60 * 60 * 1000;
+  const dateOffset = new Date(Date.now() - msIn90Days).toISOString().split('T')[0];
   const query = `created_at:>='${dateOffset}' financial_status:paid status:open,closed`;
   ```
 
@@ -667,9 +775,10 @@ Keep these 4 crucial technical nuances in mind when writing code and implementin
 - [ ] Check out repository and verify Node `>=22.12.0`.
 - [ ] Ensure local PostgreSQL and Redis servers are running.
 - [ ] Copy `.env.example` to `.env` and verify `DATABASE_URL` matches your local Postgres instance.
-- [ ] Run `npx prisma migrate dev` to establish the database schema.
+- [ ] Run `npx prisma migrate dev` to establish the database schema (including `ProcessedWebhook`).
 - [ ] Implement the `BigInt.prototype.toJSON` polyfill in `entry.server.tsx`.
 - [ ] Ensure product sync populates both `variantId` and `inventoryItemId`.
+- [ ] Implement the **"Recalculate Recent Sales"** (Heal Button) endpoint in your dashboard route.
 - [ ] Launch `npm run dev` and select your target development store.
-- [ ] Verify test orders populate `DailySalesAggregator` through the webhook queue (confirming `paid` status filtering).
+- [ ] Verify test orders populate `DailySalesAggregator` through the webhook queue (confirming `paid` status filtering and idempotency).
 - [ ] Open the replenishment dashboard and click **"Show The Math"** on any item to verify calculations!
