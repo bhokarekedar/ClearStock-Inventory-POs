@@ -6,6 +6,11 @@ import { type EntryContext } from "react-router";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
 
+// Polyfill BigInt serialization to prevent "TypeError: Do not know how to serialize a BigInt" in JSON responses
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
+
 export const streamTimeout = 5000;
 
 export default async function handleRequest(

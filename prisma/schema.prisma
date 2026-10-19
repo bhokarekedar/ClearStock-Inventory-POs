@@ -1,34 +1,183 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
 
 generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
-datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
-}
-
+// ---------------------------------------------------------
+// 1. Shopify Session Storage
+// ---------------------------------------------------------
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([shop])
+}
+
+// ---------------------------------------------------------
+// 2. Vendor Management
+// ---------------------------------------------------------
+model Supplier {
+  id              String                @id @default(uuid())
+  shop            String
+  name            String
+  contactName     String?
+  email           String?
+  phone           String?
+  defaultLeadTime Int                   @default(14) // Lead time in days
+  currency        String                @default("USD")
+  notes           String?
+  rules           VariantSupplierRule[]
+  purchaseOrders  PurchaseOrder[]
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([shop])
+}
+
+// ---------------------------------------------------------
+// 3. Variant Supplier Constraints & Replenishment Rules
+// ---------------------------------------------------------
+model VariantSupplierRule {
+  id                 String   @id @default(uuid())
+  shop               String
+  variantId          String // Shopify GID: gid://shopify/ProductVariant/XXXXX
+  inventoryItemId    String? // Shopify GID: gid://shopify/InventoryItem/XXXXX (Needed for inventory adjustments)
+  productId          String // Shopify GID: gid://shopify/Product/XXXXX
+  supplierId         String
+  supplier           Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  supplierSku        String?
+  unitCost           Decimal  @default(0.00) @db.Decimal(12, 2)
+  leadTimeDays       Int? // Overrides Supplier default if provided
+  minOrderQty        Int      @default(1) // MOQ
+  packSize           Int      @default(1) // Multiples to round up to (e.g., 12)
+  safetyStockDays    Int      @default(7) // Coverage target in days
+  safetyStockMinimum Int      @default(0) // Hard unit floor
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([shop, variantId])
+  @@index([shop, variantId])
+  @@index([supplierId])
+  @@index([inventoryItemId])
+}
+
+// ---------------------------------------------------------
+// 4. Purchase Orders (PO)
+// ---------------------------------------------------------
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id              String              @id @default(uuid())
+  shop            String
+  poNumber        String // Human-readable sequential ID (e.g., PO-1001)
+  supplierId      String
+  supplier        Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  status          PurchaseOrderStatus @default(DRAFT)
+  expectedArrival DateTime?
+  notes           String?
+  items           PurchaseOrderItem[]
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@unique([shop, poNumber])
+  @@index([shop, status])
+  @@index([supplierId])
+}
+
+model PurchaseOrderItem {
+  id               String        @id @default(uuid())
+  purchaseOrderId  String
+  purchaseOrder    PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  variantId        String // Shopify GID: gid://shopify/ProductVariant/XXXXX
+  inventoryItemId  String? // Shopify GID: gid://shopify/InventoryItem/XXXXX (For receiving mutation)
+  sku              String?
+  title            String
+  quantityOrdered  Int
+  quantityReceived Int           @default(0)
+  unitCost         Decimal       @db.Decimal(12, 2)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([purchaseOrderId])
+  @@index([variantId])
+  @@index([inventoryItemId])
+}
+
+// ---------------------------------------------------------
+// 5. Daily Sales Aggregations (Sub-Second Math Cache)
+// ---------------------------------------------------------
+model DailySalesAggregator {
+  id        String   @id @default(uuid())
+  shop      String
+  variantId String // Shopify GID: gid://shopify/ProductVariant/XXXXX
+  date      DateTime @db.Date // Stored as midnight UTC date
+  unitsSold Int      @default(0)
+
+  @@unique([shop, variantId, date])
+  @@index([shop, variantId, date])
+  @@index([shop, date])
+}
+
+// ---------------------------------------------------------
+// 6. Webhook Idempotency Ledger (Prevents Double Counting)
+// ---------------------------------------------------------
+model ProcessedWebhook {
+  id        String   @id // Stores the X-Shopify-Webhook-Id header
+  shop      String
+  topic     String
+  orderId   String? // Shopify Order GID or numeric ID if applicable
+  createdAt DateTime @default(now())
+
+  @@index([shop, topic])
+}
+
+// ---------------------------------------------------------
+// 7. Bulk Ingestion & Reconciliation Tracker
+// ---------------------------------------------------------
+enum SyncStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model HistoricalSyncJob {
+  id               String     @id @default(uuid())
+  shop             String
+  bulkOperationId  String?
+  status           SyncStatus @default(PENDING)
+  totalDays        Int        @default(90)
+  errorMessage     String?
+  lastReconciledAt DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  @@index([shop])
 }
