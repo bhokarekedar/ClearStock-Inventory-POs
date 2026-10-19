@@ -1073,7 +1073,7 @@ export default function ReplenishmentDashboard() {
                     <Text as="h3" variant="headingSm">
                       Step 1: Reorder Point (ROP) Formula
                     </Text>
-                    <Badge tone="info">Standard Statistical Heuristic</Badge>
+                    <Badge tone="info">Industry Standard</Badge>
                   </InlineStack>
 
                   <Box
@@ -1191,7 +1191,7 @@ export default function ReplenishmentDashboard() {
 
                     <InlineStack align="space-between">
                       <Text as="span" variant="bodyMd" fontWeight="bold">
-                        Net Raw Shortage Deficit:
+                        Net Shortage:
                       </Text>
                       <Text
                         as="span"
@@ -1255,10 +1255,12 @@ export default function ReplenishmentDashboard() {
 
                     <InlineStack align="space-between">
                       <Text as="span" variant="bodySm" tone="subdued">
-                        Auto-Rounding Calculation:
+                        Rounding Logic:
                       </Text>
                       <Text as="span" variant="bodySm" fontWeight="medium">
-                        ceil(max({activeMath.rawDeficit}, {activeMathItem.minOrderQty}) ÷ {activeMathItem.packSize}) × {activeMathItem.packSize}
+                        {activeMath.recommendedUnits > 0
+                          ? `${Math.max(activeMath.rawDeficit, activeMathItem.minOrderQty)} units rounded up to the next multiple of ${activeMathItem.packSize}`
+                          : "No rounding needed (0 units required)"}
                       </Text>
                     </InlineStack>
 
