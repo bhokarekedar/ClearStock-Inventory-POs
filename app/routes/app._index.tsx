@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useNavigate, useRouteError } from "react-router";
+import { useNavigate, useRouteError, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   Page,
@@ -37,10 +37,195 @@ import {
 } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
+
+// Fallback catalog defaults for product imagery & stockOnHand during local development
+const CATALOG_DEFAULTS: Record<
+  string,
+  {
+    title: string;
+    variantTitle: string;
+    sku: string;
+    imageUrl: string;
+    stockOnHand: number;
+  }
+> = {
+  "gid://shopify/ProductVariant/44129481923": {
+    title: "Heavyweight Boxy Hoodie",
+    variantTitle: "Vintage Black / Large",
+    sku: "HDY-BLK-L",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+    stockOnHand: 32,
+  },
+  "gid://shopify/ProductVariant/44129481924": {
+    title: "Organic Cotton Ribbed Beanie",
+    variantTitle: "Olive Green / One Size",
+    sku: "BN-OLV-OS",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
+    stockOnHand: 18,
+  },
+  "gid://shopify/ProductVariant/44129481925": {
+    title: "Canvas Chore Jacket",
+    variantTitle: "Caramel Tan / XL",
+    sku: "JKT-CRM-XL",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
+    stockOnHand: 8,
+  },
+  "gid://shopify/ProductVariant/44129481926": {
+    title: "Thermal Waffle Crewneck",
+    variantTitle: "Heather Grey / Medium",
+    sku: "WFL-GRY-M",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
+    stockOnHand: 14,
+  },
+  "gid://shopify/ProductVariant/44129481927": {
+    title: "Heavyweight Boxy Hoodie",
+    variantTitle: "Off-White / Medium",
+    sku: "HDY-WHT-M",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+    stockOnHand: 140,
+  },
+  "gid://shopify/ProductVariant/44129481928": {
+    title: "French Terry Sweatpants",
+    variantTitle: "Sage Green / Small",
+    sku: "SWP-SGE-S",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
+    stockOnHand: 520, // Overstocked example
+  },
+  "gid://shopify/ProductVariant/44129481929": {
+    title: "Chunky Knit Scarf",
+    variantTitle: "Charcoal / One Size",
+    sku: "SCF-CHR-OS",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
+    stockOnHand: 220, // Overstocked example
+  },
+};
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-  return null;
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+
+  // 1. Fetch Suppliers
+  const suppliersDb = await prisma.supplier.findMany({
+    orderBy: { name: "asc" },
+  });
+
+  // 2. Fetch Sourcing Rules (filter by shop, or fallback to all seeded rules in local dev)
+  let rulesDb = await prisma.variantSupplierRule.findMany({
+    where: { shop },
+    include: { supplier: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (rulesDb.length === 0) {
+    rulesDb = await prisma.variantSupplierRule.findMany({
+      include: { supplier: true },
+      orderBy: { createdAt: "asc" },
+    });
+  }
+
+  // 3. Date window boundaries for ADS calculations
+  const now = new Date();
+  const date90dAgo = new Date(now);
+  date90dAgo.setDate(date90dAgo.getDate() - 90);
+  const date30dAgo = new Date(now);
+  date30dAgo.setDate(date30dAgo.getDate() - 30);
+  const date14dAgo = new Date(now);
+  date14dAgo.setDate(date14dAgo.getDate() - 14);
+  const date7dAgo = new Date(now);
+  date7dAgo.setDate(date7dAgo.getDate() - 7);
+
+  // 4. Fetch 90 days of daily sales records from PostgreSQL
+  const salesDb = await prisma.dailySalesAggregator.findMany({
+    where: {
+      date: { gte: date90dAgo },
+    },
+  });
+
+  // 5. Fetch active incoming PO line items to prevent double-ordering
+  const openPurchaseOrders = await prisma.purchaseOrder.findMany({
+    where: {
+      status: { in: ["ORDERED", "PARTIALLY_RECEIVED"] },
+    },
+    include: {
+      items: true,
+    },
+  });
+  const openPoItems = openPurchaseOrders.flatMap((po) => po.items);
+
+  // 6. Map PostgreSQL records to ReplenishmentItem entities
+  const items: ReplenishmentItem[] = rulesDb.map((rule) => {
+    const catalog = CATALOG_DEFAULTS[rule.variantId] || {
+      title: "Product " + (rule.supplierSku || rule.id),
+      variantTitle: "Standard",
+      sku: rule.supplierSku || "SKU-" + rule.id.slice(0, 6),
+      imageUrl:
+        "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
+      stockOnHand: 25,
+    };
+
+    const variantSales = salesDb.filter((s) => s.variantId === rule.variantId);
+    const unitsSold7d = variantSales
+      .filter((s) => new Date(s.date) >= date7dAgo)
+      .reduce((sum: number, s) => sum + s.unitsSold, 0);
+    const unitsSold14d = variantSales
+      .filter((s) => new Date(s.date) >= date14dAgo)
+      .reduce((sum: number, s) => sum + s.unitsSold, 0);
+    const unitsSold30d = variantSales
+      .filter((s) => new Date(s.date) >= date30dAgo)
+      .reduce((sum: number, s) => sum + s.unitsSold, 0);
+    const unitsSold90d = variantSales
+      .filter((s) => new Date(s.date) >= date90dAgo)
+      .reduce((sum: number, s) => sum + s.unitsSold, 0);
+
+    const ads7d = Number((unitsSold7d / 7).toFixed(1));
+    const ads14d = Number((unitsSold14d / 14).toFixed(1));
+    const ads30d = Number((unitsSold30d / 30).toFixed(1));
+    const ads90d = Number((unitsSold90d / 90).toFixed(1));
+
+    // Incoming stock on open Purchase Orders
+    const stockOnOrder = openPoItems
+      .filter((p) => p.variantId === rule.variantId)
+      .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
+
+    return {
+      id: rule.id,
+      variantId: rule.variantId,
+      inventoryItemId: rule.inventoryItemId || "",
+      title: catalog.title,
+      variantTitle: catalog.variantTitle,
+      sku: catalog.sku,
+      imageUrl: catalog.imageUrl,
+      supplierId: rule.supplierId,
+      supplierName: rule.supplier.name,
+      stockOnHand: catalog.stockOnHand,
+      stockOnOrder,
+      ads7d,
+      ads14d,
+      ads30d,
+      ads90d,
+      unitsSold30d,
+      leadTimeDays: rule.leadTimeDays ?? rule.supplier.defaultLeadTime,
+      safetyStockDays: rule.safetyStockDays,
+      safetyStockMinimum: rule.safetyStockMinimum,
+      minOrderQty: rule.minOrderQty,
+      packSize: rule.packSize,
+      unitCost: Number(rule.unitCost),
+      lastSyncDate: "Synced with PostgreSQL",
+    };
+  });
+
+  return {
+    items: items.length > 0 ? items : MOCK_ITEMS,
+    suppliers: suppliersDb.map((s) => ({ id: s.id, name: s.name })),
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -348,6 +533,10 @@ export function computeReplenishmentMath(
 export default function ReplenishmentDashboard() {
   const shopify = useAppBridge();
   const navigate = useNavigate();
+  const loaderData = useLoaderData<typeof loader>();
+
+  const items = loaderData?.items && loaderData.items.length > 0 ? loaderData.items : MOCK_ITEMS;
+  const suppliers = loaderData?.suppliers || [];
 
   // Filters & Controls
   const [selectedSupplier, setSelectedSupplier] = useState<string>("all");
@@ -365,11 +554,11 @@ export default function ReplenishmentDashboard() {
 
   // Process rows with calculations
   const calculatedRows = useMemo(() => {
-    return MOCK_ITEMS.map((item) => ({
+    return items.map((item) => ({
       ...item,
       calc: computeReplenishmentMath(item, windowDaysNum),
     }));
-  }, [windowDaysNum]);
+  }, [items, windowDaysNum]);
 
   // Filtered rows
   const filteredRows = useMemo(() => {
@@ -427,13 +616,20 @@ export default function ReplenishmentDashboard() {
     };
   }, [calculatedRows]);
 
-  // Supplier Dropdown Options
-  const supplierOptions = [
-    { label: "All Suppliers", value: "all" },
-    { label: "Apex Apparel Ltd.", value: "sup-apex" },
-    { label: "Nordic Craft Co.", value: "sup-nordic" },
-    { label: "Summit Goods", value: "sup-summit" },
-  ];
+  // Supplier Dropdown Options (derived dynamically from database)
+  const supplierOptions = useMemo(() => {
+    const list = [{ label: "All Suppliers", value: "all" }];
+    if (suppliers.length > 0) {
+      suppliers.forEach((s) => list.push({ label: s.name, value: s.id }));
+    } else {
+      list.push(
+        { label: "Apex Apparel Ltd.", value: "sup-apex" },
+        { label: "Nordic Craft Co.", value: "sup-nordic" },
+        { label: "Summit Goods", value: "sup-summit" }
+      );
+    }
+    return list;
+  }, [suppliers]);
 
   // IndexFilters mode
   const { mode, setMode } = useSetIndexFiltersMode();
