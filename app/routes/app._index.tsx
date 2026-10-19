@@ -22,6 +22,7 @@ import {
   Divider,
   Box,
   Banner,
+  Tooltip,
   useIndexResourceState,
   type FilterInterface,
   type AppliedFilterInterface,
@@ -551,20 +552,26 @@ export default function ReplenishmentDashboard() {
     <Page
       title="Replenishment"
       subtitle="Simple, transparent buying recommendations. Always know what to buy and when to buy."
-      primaryAction={{
-        content: `Create PO from Selected (${selectedResources.length})`,
-        onAction: handleCreatePOFromSelected,
-        disabled: selectedResources.length === 0,
-      }}
-      secondaryActions={[
-        {
-          content: isHealing ? "Recalculating..." : "Heal Data / Recalculate",
-          icon: RefreshIcon,
-          loading: isHealing,
-          onAction: handleHealData,
-          helpText: "Instantly re-syncs recent paid orders from Shopify to verify local sales counts.",
-        },
-      ]}
+      primaryAction={
+        <InlineStack gap="200" align="center">
+          <Tooltip content="Instantly re-syncs recent paid orders from Shopify to verify local sales counts.">
+            <Button
+              icon={RefreshIcon}
+              loading={isHealing}
+              onClick={handleHealData}
+            >
+              Heal Data
+            </Button>
+          </Tooltip>
+          <Button
+            variant="primary"
+            onClick={handleCreatePOFromSelected}
+            disabled={selectedResources.length === 0}
+          >
+            {`Create PO from Selected (${selectedResources.length})`}
+          </Button>
+        </InlineStack>
+      }
     >
       <style>{`
         /* 1. Sticky Checkbox Column (Column 1) - Scoped to Replenishment table */
@@ -595,7 +602,7 @@ export default function ReplenishmentDashboard() {
           left: 48px !important;
           z-index: 23 !important;
           background-color: var(--p-color-bg-surface, #ffffff) !important;
-          min-width: 260px !important;
+          min-width: 220px !important;
           box-shadow: 3px 0 5px -2px rgba(0, 0, 0, 0.12) !important;
           border-right: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
         }
@@ -654,13 +661,18 @@ export default function ReplenishmentDashboard() {
               <Text as="h3" variant="headingSm" tone="subdued">
                 Items Below Reorder Point
               </Text>
-              <InlineStack align="space-between" blockAlign="center">
-                <Text as="p" variant="headingXl">
-                  {summaryMetrics.reorderCount} SKUs
+              <InlineStack wrap={false} blockAlign="center" gap="200">
+                <Text as="p" variant="headingLg">
+                  {summaryMetrics.reorderCount}&nbsp;
+                  <Text as="span" variant="bodySm" fontWeight="regular" tone="subdued">
+                    SKUs
+                  </Text>
                 </Text>
-                <Badge tone={summaryMetrics.reorderCount > 0 ? "critical" : "success"}>
-                  {summaryMetrics.reorderCount > 0 ? "Action Required" : "Stock OK"}
-                </Badge>
+                <div style={{ flexShrink: 0 }}>
+                  <Badge size="small" tone={summaryMetrics.reorderCount > 0 ? "critical" : "success"}>
+                    {summaryMetrics.reorderCount > 0 ? "Action Required" : "Stock OK"}
+                  </Badge>
+                </div>
               </InlineStack>
               <Text as="p" variant="bodyXs" tone="subdued">
                 Items needing restock based on recent sales
@@ -674,11 +686,16 @@ export default function ReplenishmentDashboard() {
               <Text as="h3" variant="headingSm" tone="subdued">
                 Total Shortage Units
               </Text>
-              <InlineStack align="space-between" blockAlign="center">
-                <Text as="p" variant="headingXl">
-                  {summaryMetrics.totalUnitsToOrder.toLocaleString()} units
+              <InlineStack wrap={false} blockAlign="center" gap="200">
+                <Text as="p" variant="headingLg">
+                  {summaryMetrics.totalUnitsToOrder.toLocaleString()}&nbsp;
+                  <Text as="span" variant="bodySm" fontWeight="regular" tone="subdued">
+                    units
+                  </Text>
                 </Text>
-                <Badge tone="attention">Pack Rounded</Badge>
+                <div style={{ flexShrink: 0 }}>
+                  <Badge size="small" tone="attention">Pack Rounded</Badge>
+                </div>
               </InlineStack>
               <Text as="p" variant="bodyXs" tone="subdued">
                 Auto-rounded to supplier pack & MOQ sizes
@@ -686,20 +703,22 @@ export default function ReplenishmentDashboard() {
             </BlockStack>
           </Card>
 
-          {/* Card 3: Estimated Reorder Capital */}
+          {/* Card 3: Estimated Order Cost */}
           <Card>
             <BlockStack gap="100">
               <Text as="h3" variant="headingSm" tone="subdued">
-                Estimated Reorder Capital
+                Estimated Order Cost
               </Text>
-              <InlineStack align="space-between" blockAlign="center">
-                <Text as="p" variant="headingXl">
+              <InlineStack wrap={false} blockAlign="center" gap="200">
+                <Text as="p" variant="headingLg">
                   ${summaryMetrics.totalEstimatedSpend.toLocaleString("en-US", {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2,
                   })}
                 </Text>
-                <Badge tone="info">Pre-Tax</Badge>
+                <div style={{ flexShrink: 0 }}>
+                  <Badge size="small" tone="info">Pre-Tax</Badge>
+                </div>
               </InlineStack>
               <Text as="p" variant="bodyXs" tone="subdued">
                 Estimated total cost for required stock
@@ -707,20 +726,22 @@ export default function ReplenishmentDashboard() {
             </BlockStack>
           </Card>
 
-          {/* Card 4: Dead Cash Calculator (Locked Capital) */}
+          {/* Card 4: Dead Cash Calculator (Cash Tied Up) */}
           <Card>
             <BlockStack gap="100">
               <Text as="h3" variant="headingSm" tone="subdued">
-                Locked Capital (Overstock)
+                Cash Tied Up (Overstock)
               </Text>
-              <InlineStack align="space-between" blockAlign="center">
-                <Text as="p" variant="headingXl" tone="caution">
+              <InlineStack wrap={false} blockAlign="center" gap="200">
+                <Text as="p" variant="headingLg">
                   ${summaryMetrics.lockedCapital.toLocaleString("en-US", {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2,
                   })}
                 </Text>
-                <Badge tone="warning">Overstocked</Badge>
+                <div style={{ flexShrink: 0 }}>
+                  <Badge size="small" tone="warning">Overstocked</Badge>
+                </div>
               </InlineStack>
               <Text as="p" variant="bodyXs" tone="subdued">
                 Cash trapped in items exceeding 90-day runway.
@@ -764,7 +785,6 @@ export default function ReplenishmentDashboard() {
               { title: "Status" },
               { title: "Supplier" },
               { title: "Stock & Runway" },
-              { title: "Incoming POs" },
               { title: "Daily Sales (Avg)" },
               { title: "Recommended Order", alignment: "end" },
             ]}
@@ -782,7 +802,7 @@ export default function ReplenishmentDashboard() {
                 >
                   {/* Product Details */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "260px" }}>
+                    <div style={{ minWidth: "220px" }}>
                       <InlineStack gap="300" blockAlign="center" wrap={false}>
                         <Thumbnail
                           source={row.imageUrl}
@@ -811,28 +831,28 @@ export default function ReplenishmentDashboard() {
 
                   {/* Status Column (Critical, Warning, Info, Success) */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "120px" }}>
+                    <div style={{ minWidth: "110px" }}>
                       <Badge tone={calc.statusTone}>{calc.statusLabel}</Badge>
                     </div>
                   </IndexTable.Cell>
 
                   {/* Supplier */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "150px" }}>
+                    <div style={{ minWidth: "130px" }}>
                       <Text as="span" variant="bodySm">
                         {row.supplierName}
                       </Text>
                     </div>
                   </IndexTable.Cell>
 
-                  {/* Stock & Runway */}
+                  {/* Stock & Runway (Stacked vertically: Stock, Runway badge, and Incoming) */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "140px" }}>
-                      <InlineStack gap="150" blockAlign="center">
+                    <div style={{ minWidth: "120px" }}>
+                      <BlockStack gap="100">
                         <Text
                           as="span"
                           variant="bodyMd"
-                          fontWeight={calc.statusLabel === "Reorder Now" ? "bold" : "regular"}
+                          fontWeight={calc.statusLabel === "Reorder Now" ? "bold" : "medium"}
                           tone={
                             calc.statusLabel === "Reorder Now"
                               ? "critical"
@@ -843,45 +863,39 @@ export default function ReplenishmentDashboard() {
                         >
                           {row.stockOnHand}
                         </Text>
-                        {calc.daysOfCoverageOnHand <= 7 ? (
-                          <Badge tone="critical" size="small">
-                            {`${calc.daysOfCoverageOnHand}d left`}
-                          </Badge>
-                        ) : calc.daysOfCoverageOnHand <= 14 ? (
-                          <Badge tone="attention" size="small">
-                            {`${calc.daysOfCoverageOnHand}d left`}
-                          </Badge>
-                        ) : calc.isOverstocked ? (
-                          <Badge tone="warning" size="small">
-                            {`${calc.daysOfCoverageOnHand > 365 ? "365+d" : calc.daysOfCoverageOnHand + "d"} runway`}
-                          </Badge>
-                        ) : (
-                          <Badge tone="success" size="small">
-                            {`${calc.daysOfCoverageOnHand > 60 ? "60+d" : calc.daysOfCoverageOnHand + "d"}`}
-                          </Badge>
+                        <div>
+                          {calc.daysOfCoverageOnHand <= 7 ? (
+                            <Badge tone="critical" size="small">
+                              {`${calc.daysOfCoverageOnHand}d left`}
+                            </Badge>
+                          ) : calc.daysOfCoverageOnHand <= 14 ? (
+                            <Badge tone="attention" size="small">
+                              {`${calc.daysOfCoverageOnHand}d left`}
+                            </Badge>
+                          ) : calc.isOverstocked ? (
+                            <Badge tone="warning" size="small">
+                              {`${calc.daysOfCoverageOnHand > 365 ? "365+d" : calc.daysOfCoverageOnHand + "d"} runway`}
+                            </Badge>
+                          ) : (
+                            <Badge tone="success" size="small">
+                              {`${calc.daysOfCoverageOnHand > 60 ? "60+d" : calc.daysOfCoverageOnHand + "d"}`}
+                            </Badge>
+                          )}
+                        </div>
+                        {row.stockOnOrder > 0 && (
+                          <div>
+                            <Badge tone="info" size="small">
+                              {`+${row.stockOnOrder} incoming`}
+                            </Badge>
+                          </div>
                         )}
-                      </InlineStack>
-                    </div>
-                  </IndexTable.Cell>
-
-                  {/* Incoming POs */}
-                  <IndexTable.Cell>
-                    <div style={{ minWidth: "100px" }}>
-                      <Text as="span" variant="bodySm">
-                        {row.stockOnOrder > 0 ? (
-                          <Badge tone="info">{`+${row.stockOnOrder}`}</Badge>
-                        ) : (
-                          <Text as="span" tone="subdued">
-                            0
-                          </Text>
-                        )}
-                      </Text>
+                      </BlockStack>
                     </div>
                   </IndexTable.Cell>
 
                   {/* Daily Sales (Avg) */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "120px" }}>
+                    <div style={{ minWidth: "110px" }}>
                       <Text as="span" variant="bodySm">
                         {`${calc.ads.toFixed(1)} /day`}
                       </Text>
@@ -890,7 +904,7 @@ export default function ReplenishmentDashboard() {
 
                   {/* Recommended Order & View Math Button */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "180px", textAlign: "right" }}>
+                    <div style={{ minWidth: "170px", textAlign: "right" }}>
                       {calc.recommendedUnits > 0 ? (
                         <Button
                           variant="secondary"
