@@ -37,6 +37,11 @@
 7. [Shopify GraphQL Reference Patterns](#7-shopify-graphql-reference-patterns)
    - [Initial Historical Sync (`bulkOperationRunQuery`)](#initial-historical-sync-bulkoperationrunquery)
    - [Stock Receiving Mutation (`inventoryAdjustQuantities`)](#stock-receiving-mutation-inventoryadjustquantities)
+8. [Implementation Nuances & Technical "Gotchas"](#8-implementation-nuances--technical-gotchas)
+   - [1. Variant GID vs. InventoryItem GID Mapping](#1-variant-gid-vs-inventoryitem-gid-mapping)
+   - [2. Dynamic Date Filtering in Historical Bulk Query](#2-dynamic-date-filtering-in-historical-bulk-query)
+   - [3. Order Webhook Sanitization & Payment/Fraud Filtering](#3-order-webhook-sanitization--paymentfraud-filtering)
+   - [4. Node.js BigInt Serialization in Remix Loaders](#4-nodejs-bigint-serialization-in-remix-loaders)
 
 ---
 
@@ -74,9 +79,9 @@ No neural networks, no hidden weights, and zero guessing.
 ### 1. Data Ingestion & Resilient Syncing
 * **Historical Backfill via Bulk API:** Upon initial store connection, the app initiates a Shopify Admin GraphQL `bulkOperationRunQuery`. This ingests up to 180 days of fulfilled line items without risking REST/GraphQL rate limit exhaustion.
 * **Continuous Delta Syncing via Webhooks:**
-  - `orders/create` & `orders/updated`: Streams sales into the local store.
+  - `orders/create` & `orders/updated`: Streams sales into the local store (filtered strictly by paid, non-fraudulent orders).
   - `inventory_levels/update`: Keeps available stock in sync with live warehouse counts.
-  - `products/create`, `products/update`, `products/delete`: Synchronizes variant IDs, titles, SKUs, and barcodes.
+  - `products/create`, `products/update`, `products/delete`: Synchronizes variant IDs, titles, SKUs, and inventoryItem IDs.
 * **Pre-Aggregated Sales Table:** Instead of recalculating sales across millions of orders on the fly, events are aggregated into a daily ledger (`DailySalesAggregator`). Dashboard queries run in **< 150ms** locally.
 
 ### 2. Deterministic Replenishment Engine
@@ -97,6 +102,7 @@ No neural networks, no hidden weights, and zero guessing.
 * **Vendor Master Catalog:** Manage vendors with default contacts, currency, payment terms, and baseline lead times.
 * **Per-Variant Sourcing Rules (`VariantSupplierRule`):**
   - **Supplier SKU:** Match vendor-specific part numbers.
+  - **Inventory Item ID:** Direct reference to Shopify's `InventoryItem` for instant stock adjustments.
   - **Unit Cost:** Track purchase unit cost for margin and PO valuation.
   - **Lead Time (Days):** Specific production + transit time for this variant.
   - **Minimum Order Quantity (MOQ):** Supplier's minimum threshold.
@@ -258,6 +264,7 @@ model VariantSupplierRule {
   id                 String   @id @default(uuid())
   shop               String
   variantId          String   // Shopify GID: gid://shopify/ProductVariant/XXXXX
+  inventoryItemId    String?  // Shopify GID: gid://shopify/InventoryItem/XXXXX (Needed for inventory adjustments)
   productId          String   // Shopify GID: gid://shopify/Product/XXXXX
   supplierId         String
   supplier           Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
@@ -274,6 +281,7 @@ model VariantSupplierRule {
   @@unique([shop, variantId])
   @@index([shop, variantId])
   @@index([supplierId])
+  @@index([inventoryItemId])
 }
 
 // ---------------------------------------------------------
@@ -306,20 +314,22 @@ model PurchaseOrder {
 }
 
 model PurchaseOrderItem {
-  id              String        @id @default(uuid())
-  purchaseOrderId String
-  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
-  variantId       String        // Shopify GID
-  sku             String?
-  title           String
-  quantityOrdered Int
-  quantityReceived Int          @default(0)
-  unitCost        Decimal       @db.Decimal(12, 2)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  id               String        @id @default(uuid())
+  purchaseOrderId  String
+  purchaseOrder    PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  variantId        String        // Shopify GID: gid://shopify/ProductVariant/XXXXX
+  inventoryItemId  String?       // Shopify GID: gid://shopify/InventoryItem/XXXXX (For receiving mutation)
+  sku              String?
+  title            String
+  quantityOrdered  Int
+  quantityReceived Int           @default(0)
+  unitCost         Decimal       @db.Decimal(12, 2)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   @@index([purchaseOrderId])
   @@index([variantId])
+  @@index([inventoryItemId])
 }
 
 // ---------------------------------------------------------
@@ -348,14 +358,14 @@ enum SyncStatus {
 }
 
 model HistoricalSyncJob {
-  id             String     @id @default(uuid())
-  shop           String
+  id              String     @id @default(uuid())
+  shop            String
   bulkOperationId String?
-  status         SyncStatus @default(PENDING)
-  totalDays      Int        @default(90)
-  errorMessage   String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  status          SyncStatus @default(PENDING)
+  totalDays       Int        @default(90)
+  errorMessage    String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   @@index([shop])
 }
@@ -370,6 +380,7 @@ model HistoricalSyncJob {
     AND "variantId" = :variantId 
     AND "date" >= NOW() - INTERVAL '30 days';
   ```
+* **`inventoryItemId` in `VariantSupplierRule` and `PurchaseOrderItem`:** Preserving the `inventoryItemId` alongside `variantId` eliminates the need for expensive runtime queries during the PO receiving workflow.
 * **`VariantSupplierRule`:** Contains unique constraints per variant to prevent duplicate supplier mappings for the single-location MVP.
 * **`PurchaseOrder` & `PurchaseOrderItem`:** Preserves an exact ledger of historical costs and received unit counts independent of live Shopify product price edits.
 
@@ -385,18 +396,18 @@ scopes = "read_orders,read_products,write_products,read_inventory,write_inventor
 ```
 
 * `read_orders`: Required to backfill and ingest order line items to calculate ADS.
-* `read_products`, `write_products`: Read SKU, barcode, title; store configuration metafields if needed.
+* `read_products`, `write_products`: Read SKU, barcode, title, and query `inventoryItem` GIDs.
 * `read_inventory`, `write_inventory`: Ingest live on-hand counts and adjust stock upon PO receiving via `inventoryAdjustQuantities`.
 
 ### Webhook Subscriptions
 Ensure the following webhooks are declared in `shopify.app.toml` or registered dynamically via Remix `afterAuth`:
 
-| Webhook Topic | Target URI | Payload Purpose |
+| Webhook Topic | Target URI | Payload Purpose & Filtering Rule |
 | :--- | :--- | :--- |
-| `orders/create` | `/webhooks/orders/create` | Increment units in `DailySalesAggregator` for current date. |
-| `orders/updated` | `/webhooks/orders/updated` | Handle order cancellations, line item edits, or returns. |
+| `orders/create` | `/webhooks/orders/create` | Increment units in `DailySalesAggregator`. **Rule:** Only aggregate if `financial_status == 'paid'` and order is not cancelled. |
+| `orders/updated` | `/webhooks/orders/updated` | Reconcile cancellations, refunds, or financial status changes. |
 | `inventory_levels/update` | `/webhooks/inventory/update` | Synchronize stock-on-hand changes from external channels/POS. |
-| `products/update` | `/webhooks/products/update` | Synchronize variant title, SKU, or status changes. |
+| `products/update` | `/webhooks/products/update` | Synchronize variant title, SKU, and maintain `variantId` $\leftrightarrow$ `inventoryItemId` mapping. |
 | `app/uninstalled` | `/webhooks/app/uninstalled` | Clean up sessions and pause scheduled worker tasks. |
 | `app/scopes_update` | `/webhooks/app/scopes_update` | Refresh and re-authenticate scopes if requirements change. |
 
@@ -496,43 +507,52 @@ Shopify requires HTTPS tunnels for local development:
 ## 7. Shopify GraphQL Reference Patterns
 
 ### Initial Historical Sync (`bulkOperationRunQuery`)
-On first install, trigger this mutation to extract historical orders for the past 90 days without exhausting GraphQL rate limits:
+On first install, trigger this mutation dynamically with calculated date ranges (e.g., 90 or 180 days prior) and filter strictly for valid `paid` orders:
 
-```graphql
-mutation CreateHistoricalOrdersBulkOperation {
-  bulkOperationRunQuery(
-    query: """
-    {
-      orders(query: "created_at:>='2026-01-01' status:open,closed") {
-        edges {
-          node {
-            id
-            createdAt
-            lineItems {
-              edges {
-                node {
-                  variant {
-                    id
+```typescript
+// Helper to construct dynamic bulk query in Remix action/worker
+export function buildHistoricalBulkOperationQuery(daysToBackfill = 90) {
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - daysToBackfill);
+  const formattedDate = cutoffDate.toISOString().split("T")[0]; // "YYYY-MM-DD"
+
+  return `
+    mutation CreateHistoricalOrdersBulkOperation {
+      bulkOperationRunQuery(
+        query: """
+        {
+          orders(query: "created_at:>='${formattedDate}' financial_status:paid status:open,closed") {
+            edges {
+              node {
+                id
+                createdAt
+                lineItems {
+                  edges {
+                    node {
+                      variant {
+                        id
+                      }
+                      quantity
+                    }
                   }
-                  quantity
                 }
               }
             }
           }
         }
+        """
+      ) {
+        bulkOperation {
+          id
+          status
+        }
+        userErrors {
+          field
+          message
+        }
       }
     }
-    """
-  ) {
-    bulkOperation {
-      id
-      status
-    }
-    userErrors {
-      field
-      message
-    }
-  }
+  `;
 }
 ```
 
@@ -591,12 +611,65 @@ mutation AdjustInventoryOnReceiving($input: InventoryAdjustQuantitiesInput!) {
 
 ---
 
+## 8. Implementation Nuances & Technical "Gotchas"
+
+Keep these 4 crucial technical nuances in mind when writing code and implementing workers:
+
+### 1. Variant GID vs. InventoryItem GID Mapping
+* **The Nuance:** Replenishment metrics and ADS are tracked per `variantId` (`gid://shopify/ProductVariant/123`), but Shopify's `inventoryAdjustQuantities` mutation exclusively accepts `inventoryItemId` (`gid://shopify/InventoryItem/456`).
+* **Implementation Rule:** 
+  - When storing `VariantSupplierRule` or generating `PurchaseOrderItem`s, store both `variantId` and `inventoryItemId`.
+  - When syncing products via GraphQL, extract the nested inventory item ID:
+    ```graphql
+    productVariant {
+      id
+      inventoryItem {
+        id
+      }
+    }
+    ```
+  - This eliminates extra Shopify API calls at the moment a merchant receives a Purchase Order.
+
+### 2. Dynamic Date Filtering in Historical Bulk Query
+* **The Nuance:** Hardcoded query strings (e.g., `created_at:>='2026-01-01'`) will pull progressively larger datasets as time goes on, causing slow initial syncs or hitting bulk operation memory limits.
+* **Implementation Rule:** Always dynamically calculate the ISO date string:
+  ```typescript
+  const dateOffset = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const query = `created_at:>='${dateOffset}' financial_status:paid status:open,closed`;
+  ```
+
+### 3. Order Webhook Sanitization & Payment/Fraud Filtering
+* **The Nuance:** `orders/create` fires for unpaid, pending, high-risk fraudulent, and pre-authorized orders. Aggregating all orders naively will artificially inflate Average Daily Sales (ADS), causing merchants to over-order.
+* **Implementation Rule:** In your webhook queue worker, filter events before writing to `DailySalesAggregator`:
+  ```typescript
+  // app/workers/orderSync.worker.ts
+  if (order.cancelled_at !== null) return;
+  if (order.financial_status !== "paid" && order.financial_status !== "partially_paid") return;
+  // Proceed with aggregating units
+  ```
+  Additionally, listen to `orders/updated` to decrement units if an order is cancelled or refunded within the rolling ADS window.
+
+### 4. Node.js BigInt Serialization in Remix Loaders
+* **The Nuance:** The Prisma session model uses `BigInt` for `userId` (required by `@shopify/shopify-app-session-storage-prisma`). JavaScript's native `JSON.stringify()` throws a `TypeError: Do not know how to serialize a BigInt` when returning data from Remix loaders.
+* **Implementation Rule:** Add a global BigInt JSON serializer in `entry.server.tsx` or use `superjson`:
+  ```typescript
+  // app/entry.server.tsx (or top of server startup)
+  (BigInt.prototype as any).toJSON = function () {
+    return this.toString();
+  };
+  ```
+  Or explicitly map/omit `userId` when querying sessions in your application loaders.
+
+---
+
 ## Summary Checklist for Developers
 
 - [ ] Check out repository and verify Node `>=22.12.0`.
 - [ ] Ensure local PostgreSQL and Redis servers are running.
 - [ ] Copy `.env.example` to `.env` and verify `DATABASE_URL` matches your local Postgres instance.
 - [ ] Run `npx prisma migrate dev` to establish the database schema.
+- [ ] Implement the `BigInt.prototype.toJSON` polyfill in `entry.server.tsx`.
+- [ ] Ensure product sync populates both `variantId` and `inventoryItemId`.
 - [ ] Launch `npm run dev` and select your target development store.
-- [ ] Verify test orders populate `DailySalesAggregator` through the webhook queue.
+- [ ] Verify test orders populate `DailySalesAggregator` through the webhook queue (confirming `paid` status filtering).
 - [ ] Open the replenishment dashboard and click **"Show The Math"** on any item to verify calculations!
