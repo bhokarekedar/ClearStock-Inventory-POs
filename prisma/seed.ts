@@ -1,4 +1,5 @@
 import { PrismaClient, PurchaseOrderStatus } from "@prisma/client";
+import { CATALOG_VARIANTS, getCatalogItem } from "../app/catalog";
 
 const prisma = new PrismaClient();
 
@@ -7,7 +8,7 @@ async function main() {
 
   // Determine shop domain: use existing session shop, or environment variable, or local fallback
   const session = await prisma.session.findFirst();
-  const shop = session?.shop || process.env.SHOP_DOMAIN || "quickstart-demo.myshopify.com";
+  const shop = session?.shop || process.env.SHOP_DOMAIN || "test-store-pzq1asjy.myshopify.com";
   console.log(`🏪 Seeding data for shop: ${shop}`);
 
   // ---------------------------------------------------------------------------
@@ -59,115 +60,37 @@ async function main() {
   console.log(`✅ Seeded ${suppliersData.length} Suppliers`);
 
   // ---------------------------------------------------------------------------
-  // 2. Seed Sourcing Rules (VariantSupplierRule)
+  // 2. Seed Sourcing Rules for all 45 variants
   // ---------------------------------------------------------------------------
-  const rulesData = [
-    {
-      id: "rule-1",
+  const rulesData = CATALOG_VARIANTS.map((item, idx) => {
+    let supplierId = "sup-apex";
+    let leadTimeDays = 14;
+
+    if (item.category === "Headwear" || item.category === "Accessories") {
+      supplierId = "sup-nordic";
+      leadTimeDays = 21;
+    } else if (item.category === "Outerwear" || item.sku.startsWith("CPT")) {
+      supplierId = "sup-summit";
+      leadTimeDays = 28;
+    }
+
+    const inventoryItemId = `gid://shopify/InventoryItem/481928412${idx < 10 ? "0" + idx : idx}`;
+
+    return {
       shop,
-      variantId: "gid://shopify/ProductVariant/44129481923",
-      inventoryItemId: "gid://shopify/InventoryItem/48192841291",
-      productId: "gid://shopify/Product/84920192810",
-      supplierId: "sup-apex",
-      supplierSku: "HDY-BLK-L",
-      unitCost: 18.5,
-      leadTimeDays: 14,
-      minOrderQty: 50,
-      packSize: 24,
-      safetyStockDays: 7,
-      safetyStockMinimum: 20,
-    },
-    {
-      id: "rule-2",
-      shop,
-      variantId: "gid://shopify/ProductVariant/44129481924",
-      inventoryItemId: "gid://shopify/InventoryItem/48192841292",
-      productId: "gid://shopify/Product/84920192811",
-      supplierId: "sup-nordic",
-      supplierSku: "BN-OLV-OS",
-      unitCost: 6.2,
-      leadTimeDays: 21,
-      minOrderQty: 100,
-      packSize: 20,
-      safetyStockDays: 10,
-      safetyStockMinimum: 15,
-    },
-    {
-      id: "rule-3",
-      shop,
-      variantId: "gid://shopify/ProductVariant/44129481925",
-      inventoryItemId: "gid://shopify/InventoryItem/48192841293",
-      productId: "gid://shopify/Product/84920192812",
-      supplierId: "sup-summit",
-      supplierSku: "JKT-CRM-XL",
-      unitCost: 34.0,
-      leadTimeDays: 28,
-      minOrderQty: 50,
-      packSize: 10,
-      safetyStockDays: 14,
-      safetyStockMinimum: 40,
-    },
-    {
-      id: "rule-4",
-      shop,
-      variantId: "gid://shopify/ProductVariant/44129481926",
-      inventoryItemId: "gid://shopify/InventoryItem/48192841294",
-      productId: "gid://shopify/Product/84920192813",
-      supplierId: "sup-apex",
-      supplierSku: "WFL-GRY-M",
-      unitCost: 14.0,
-      leadTimeDays: 14,
-      minOrderQty: 25,
-      packSize: 12,
+      variantId: item.variantId,
+      inventoryItemId,
+      productId: item.productId,
+      supplierId,
+      supplierSku: item.sku,
+      unitCost: item.defaultCost,
+      leadTimeDays,
+      minOrderQty: item.category === "Outerwear" ? 20 : 40,
+      packSize: item.category === "Outerwear" ? 6 : 12,
       safetyStockDays: 7,
       safetyStockMinimum: 15,
-    },
-    {
-      id: "rule-5",
-      shop,
-      variantId: "gid://shopify/ProductVariant/44129481927",
-      inventoryItemId: "gid://shopify/InventoryItem/48192841295",
-      productId: "gid://shopify/Product/84920192810",
-      supplierId: "sup-apex",
-      supplierSku: "HDY-WHT-M",
-      unitCost: 18.5,
-      leadTimeDays: 14,
-      minOrderQty: 50,
-      packSize: 24,
-      safetyStockDays: 7,
-      safetyStockMinimum: 20,
-    },
-    {
-      id: "rule-6",
-      shop,
-      variantId: "gid://shopify/ProductVariant/44129481928",
-      inventoryItemId: "gid://shopify/InventoryItem/48192841296",
-      productId: "gid://shopify/Product/84920192814",
-      supplierId: "sup-apex",
-      supplierSku: "SWP-SGE-S",
-      unitCost: 22.0,
-      leadTimeDays: 14,
-      minOrderQty: 50,
-      packSize: 20,
-      safetyStockDays: 7,
-      safetyStockMinimum: 15,
-    },
-    {
-      id: "rule-7",
-      shop,
-      variantId: "gid://shopify/ProductVariant/44129481929",
-      inventoryItemId: "gid://shopify/InventoryItem/48192841297",
-      productId: "gid://shopify/Product/84920192815",
-      supplierId: "sup-nordic",
-      supplierSku: "SCF-CHR-OS",
-      unitCost: 14.0,
-      leadTimeDays: 21,
-      minOrderQty: 50,
-      packSize: 10,
-      safetyStockDays: 10,
-      safetyStockMinimum: 10,
-    },
-  ];
+    };
+  });
 
   for (const r of rulesData) {
     await prisma.variantSupplierRule.upsert({
@@ -184,7 +107,7 @@ async function main() {
   console.log(`✅ Seeded ${rulesData.length} Sourcing Rules (VariantSupplierRule)`);
 
   // ---------------------------------------------------------------------------
-  // 3. Seed Open Purchase Order (Prevents Double-Ordering!)
+  // 3. Seed Open Purchase Order (PO-1001)
   // ---------------------------------------------------------------------------
   const expectedDate = new Date();
   expectedDate.setDate(expectedDate.getDate() + 3);
@@ -223,7 +146,7 @@ async function main() {
       title: "Thermal Waffle Crewneck (Heather Grey / Medium)",
       quantityOrdered: 50,
       quantityReceived: 0,
-      unitCost: 14.0,
+      unitCost: 11.5,
     },
     create: {
       id: "po-item-1",
@@ -234,26 +157,15 @@ async function main() {
       title: "Thermal Waffle Crewneck (Heather Grey / Medium)",
       quantityOrdered: 50,
       quantityReceived: 0,
-      unitCost: 14.0,
+      unitCost: 11.5,
     },
   });
   console.log(`✅ Seeded Active Purchase Order (PO-1001) with 50 incoming units`);
 
   // ---------------------------------------------------------------------------
-  // 4. Seed 90 Days of Sales in DailySalesAggregator (Sub-Second Cache)
+  // 4. Seed 90 Days of Sales in DailySalesAggregator
   // ---------------------------------------------------------------------------
-  console.log("⏳ Generating 90-day daily sales history for all SKUs...");
-
-  // Baseline target daily sales rate per variant
-  const salesProfiles: Record<string, { base: number; variance: number }> = {
-    "gid://shopify/ProductVariant/44129481923": { base: 8.5, variance: 3 }, // Fast seller (Hoodie Black)
-    "gid://shopify/ProductVariant/44129481924": { base: 2.0, variance: 1 }, // Steady (Beanie)
-    "gid://shopify/ProductVariant/44129481925": { base: 11.0, variance: 4 }, // High demand (Jacket)
-    "gid://shopify/ProductVariant/44129481926": { base: 4.2, variance: 2 }, // Moderate (Waffle)
-    "gid://shopify/ProductVariant/44129481927": { base: 3.5, variance: 2 }, // Moderate (Hoodie White)
-    "gid://shopify/ProductVariant/44129481928": { base: 1.0, variance: 1 }, // Slow moving / Overstocked (Sweatpants)
-    "gid://shopify/ProductVariant/44129481929": { base: 0.5, variance: 1 }, // Very slow / Overstocked (Scarf)
-  };
+  console.log("⏳ Generating 90-day daily sales history for all 45 SKUs...");
 
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -264,14 +176,24 @@ async function main() {
     const saleDate = new Date(today);
     saleDate.setUTCDate(today.getUTCDate() - dayOffset);
 
-    for (const [variantId, profile] of Object.entries(salesProfiles)) {
-      // Create slight realistic daily variance
-      const randomJitter = (Math.sin(dayOffset * 0.7) + (Math.random() - 0.5)) * profile.variance;
-      const unitsSold = Math.max(0, Math.round(profile.base + randomJitter));
+    for (let i = 0; i < CATALOG_VARIANTS.length; i++) {
+      const v = CATALOG_VARIANTS[i];
+      // Generate diverse sales velocities:
+      // - First 10 items: fast-moving (6 to 12 units/day)
+      // - Next 20 items: moderate (2 to 5 units/day)
+      // - Next 10 items: slow / seasonal (0 to 2 units/day)
+      // - Last 5 items: overstocked (0.2 units/day)
+      let baseVelocity = 3.5;
+      if (i < 10) baseVelocity = 8.0;
+      else if (i >= 30 && i < 40) baseVelocity = 1.2;
+      else if (i >= 40) baseVelocity = 0.5;
+
+      const randomJitter = (Math.sin(dayOffset * 0.5 + i) + (Math.random() - 0.5)) * 1.5;
+      const unitsSold = Math.max(0, Math.round(baseVelocity + randomJitter));
 
       salesRecords.push({
         shop,
-        variantId,
+        variantId: v.variantId,
         date: saleDate,
         unitsSold,
       });
@@ -281,8 +203,8 @@ async function main() {
   // Clear previous aggregated records for clean seed
   await prisma.dailySalesAggregator.deleteMany({ where: { shop } });
 
-  // Bulk create in chunks to be respectful of PostgreSQL limits
-  const CHUNK_SIZE = 100;
+  // Bulk create in chunks
+  const CHUNK_SIZE = 150;
   for (let i = 0; i < salesRecords.length; i += CHUNK_SIZE) {
     const chunk = salesRecords.slice(i, i + CHUNK_SIZE);
     await prisma.dailySalesAggregator.createMany({
@@ -292,6 +214,23 @@ async function main() {
   }
 
   console.log(`✅ Seeded ${salesRecords.length} daily sales ledger rows across 90 days!`);
+
+  // ---------------------------------------------------------------------------
+  // 5. Seed Default AppSettings
+  // ---------------------------------------------------------------------------
+  await prisma.appSettings.upsert({
+    where: { shop },
+    update: {},
+    create: {
+      shop,
+      defaultLookbackWindow: 30,
+      defaultSafetyStockDays: 7,
+      defaultLeadTimeDays: 14,
+      autoRoundCasePacks: true,
+      emailAlerts: false,
+    },
+  });
+  console.log(`✅ Seeded Default AppSettings for ${shop}`);
   console.log("🎉 Database seeding complete!");
 }
 

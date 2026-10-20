@@ -16,77 +16,23 @@ import {
   Divider,
   Banner,
   Select,
+  Modal,
+  Box,
+  Icon,
 } from "@shopify/polaris";
 import {
   ArrowLeftIcon,
   ExportIcon,
   CheckIcon,
   DeleteIcon,
+  PlusIcon,
+  SearchIcon,
+  AlertCircleIcon,
 } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-
-// Fallback catalog details for product imagery and display
-const CATALOG_DEFAULTS: Record<
-  string,
-  {
-    title: string;
-    variantTitle: string;
-    sku: string;
-    imageUrl: string;
-  }
-> = {
-  "gid://shopify/ProductVariant/44129481923": {
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Vintage Black / Large",
-    sku: "HDY-BLK-L",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-  },
-  "gid://shopify/ProductVariant/44129481924": {
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Olive Green / One Size",
-    sku: "BN-OLV-OS",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-  },
-  "gid://shopify/ProductVariant/44129481925": {
-    title: "Canvas Chore Jacket",
-    variantTitle: "Caramel Tan / XL",
-    sku: "JKT-CRM-XL",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
-  },
-  "gid://shopify/ProductVariant/44129481926": {
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Heather Grey / Medium",
-    sku: "WFL-GRY-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
-  },
-  "gid://shopify/ProductVariant/44129481927": {
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Off-White / Medium",
-    sku: "HDY-WHT-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-  },
-  "gid://shopify/ProductVariant/44129481928": {
-    title: "French Terry Sweatpants",
-    variantTitle: "Sage Green / Small",
-    sku: "SWP-SGE-S",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
-  },
-  "gid://shopify/ProductVariant/44129481929": {
-    title: "Chunky Knit Scarf",
-    variantTitle: "Charcoal / One Size",
-    sku: "SCF-CHR-OS",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-  },
-};
+import { getCatalogItem } from "../catalog";
 
 export interface DraftPOItem {
   id: string;
@@ -103,6 +49,22 @@ export interface DraftPOItem {
   unitCost: number;
 }
 
+export interface AvailableRuleItem {
+  ruleId: string;
+  variantId: string;
+  inventoryItemId: string;
+  supplierId: string;
+  supplierName: string;
+  title: string;
+  variantTitle: string;
+  sku: string;
+  supplierSku: string;
+  imageUrl: string;
+  packSize: number;
+  unitCost: number;
+  minOrderQty: number;
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -112,47 +74,72 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const selectedRuleIds = itemsParam ? itemsParam.split(",").filter(Boolean) : [];
 
   // 1. Fetch all suppliers for selection
-  const suppliers = await prisma.supplier.findMany({
+  const suppliersDb = await prisma.supplier.findMany({
+    where: {
+      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
+    },
     orderBy: { name: "asc" },
   });
 
-  // 2. Determine next sequential PO number
+  // 2. Fetch all rules for the shop with supplier and catalog details
+  const allRulesDb = await prisma.variantSupplierRule.findMany({
+    where: {
+      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
+    },
+    include: { supplier: true },
+    orderBy: { variantId: "asc" },
+  });
+
+  const availableRules: AvailableRuleItem[] = allRulesDb.map((r) => {
+    const catalog = getCatalogItem(r.variantId);
+    return {
+      ruleId: r.id,
+      variantId: r.variantId,
+      inventoryItemId: r.inventoryItemId || catalog.inventoryItemId || "",
+      supplierId: r.supplierId,
+      supplierName: r.supplier.name,
+      title: catalog.title,
+      variantTitle: catalog.variantTitle,
+      sku: catalog.sku,
+      supplierSku: r.supplierSku || catalog.sku,
+      imageUrl: catalog.imageUrl,
+      packSize: r.packSize,
+      unitCost: Number(r.unitCost),
+      minOrderQty: r.minOrderQty,
+    };
+  });
+
+  // 3. Determine next sequential PO number
   const poCount = await prisma.purchaseOrder.count();
   const nextPoNumber = `PO-${1002 + poCount}`;
 
-  // 3. Fetch rules for selected items or fallback to top rules
+  // 4. Fetch rules for selected items or fallback to top rules
   const selectedRules =
     selectedRuleIds.length > 0
-      ? await prisma.variantSupplierRule.findMany({
-          where: { id: { in: selectedRuleIds } },
-          include: { supplier: true },
-        })
+      ? allRulesDb.filter((r) => selectedRuleIds.includes(r.id))
       : [];
 
-  const rules =
-    selectedRules.length > 0
-      ? selectedRules
-      : await prisma.variantSupplierRule.findMany({
-          include: { supplier: true },
-          take: 3,
-        });
-
-  // 4. Default to primary supplier
-  const primarySupplier = rules[0]?.supplier || suppliers[0] || {
+  // Group selected items by supplier to avoid cross-supplier contamination
+  let primarySupplier = suppliersDb[0] || {
     id: "sup-apex",
     name: "Apex Apparel Ltd.",
     defaultLeadTime: 14,
   };
 
-  // 5. Pre-calculate recommended case-pack quantities
-  const draftItems: DraftPOItem[] = rules.map((r) => {
-    const catalog = CATALOG_DEFAULTS[r.variantId] || {
-      title: "Product " + (r.supplierSku || r.id),
-      variantTitle: "Default Variant",
-      sku: r.supplierSku || "SKU-" + r.id.slice(0, 6),
-      imageUrl: "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    };
+  let initialRules = selectedRules;
+  if (selectedRules.length > 0) {
+    // Pick the supplier of the first selected item as the primary supplier
+    primarySupplier = selectedRules[0].supplier;
+    // Filter initial rules so they strictly belong to the primary supplier
+    initialRules = selectedRules.filter((r) => r.supplierId === primarySupplier.id);
+  } else if (allRulesDb.length > 0) {
+    // Default to first 3 rules of the primary supplier
+    initialRules = allRulesDb.filter((r) => r.supplierId === primarySupplier.id).slice(0, 3);
+  }
 
+  // 5. Pre-calculate recommended case-pack quantities
+  const draftItems: DraftPOItem[] = initialRules.map((r) => {
+    const catalog = getCatalogItem(r.variantId);
     const deficit = Math.max(r.minOrderQty, 24);
     const cases = Math.ceil(deficit / r.packSize);
     const recommendedQty = cases * r.packSize;
@@ -160,7 +147,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return {
       id: r.id,
       variantId: r.variantId,
-      inventoryItemId: r.inventoryItemId || "",
+      inventoryItemId: r.inventoryItemId || catalog.inventoryItemId || "",
       title: catalog.title,
       variantTitle: catalog.variantTitle,
       sku: catalog.sku,
@@ -175,11 +162,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     poNumber: nextPoNumber,
-    suppliers: suppliers.map((s) => ({ label: s.name, value: s.id })),
+    suppliers: suppliersDb.map((s) => ({
+      label: s.name,
+      value: s.id,
+      leadTime: s.defaultLeadTime || 14,
+    })),
     defaultSupplierId: primarySupplier.id,
     defaultSupplierName: primarySupplier.name,
     defaultLeadTime: primarySupplier.defaultLeadTime || 14,
     items: draftItems,
+    availableRules,
+    skippedCrossSupplierCount: selectedRules.length - initialRules.length,
   };
 };
 
@@ -252,6 +245,13 @@ export default function PurchaseOrderDraftEditor() {
   );
   const [items, setItems] = useState<DraftPOItem[]>(loaderData.items);
 
+  // Line Item Picker Modal State
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [addSearchQuery, setAddSearchQuery] = useState("");
+
+  // Supplier Change Confirmation State
+  const [pendingSupplierId, setPendingSupplierId] = useState<string | null>(null);
+
   // Update item quantity
   const handleQuantityChange = (id: string, newQtyStr: string) => {
     const qty = parseInt(newQtyStr, 10);
@@ -266,6 +266,99 @@ export default function PurchaseOrderDraftEditor() {
   const handleRemoveItem = (id: string) => {
     setItems((prev) => prev.filter((item) => item.id !== id));
     shopify.toast.show("Line item removed from PO.");
+  };
+
+  // Safe Supplier Switch with Cross-Supplier Protection
+  const handleSupplierChange = (newSupplierId: string) => {
+    if (newSupplierId === supplierId) return;
+
+    const newSupplierObj = loaderData.suppliers.find((s) => s.value === newSupplierId);
+    const newLeadTime = newSupplierObj?.leadTime || 14;
+
+    // Check if existing items belong to another supplier
+    const conflictingItems = items.filter((item) => {
+      const rule = loaderData.availableRules.find((r) => r.variantId === item.variantId);
+      return rule && rule.supplierId !== newSupplierId;
+    });
+
+    if (conflictingItems.length > 0) {
+      setPendingSupplierId(newSupplierId);
+    } else {
+      setSupplierId(newSupplierId);
+      setSupplierName(newSupplierObj?.label || "");
+      setExpectedArrival(
+        new Date(Date.now() + newLeadTime * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+      );
+    }
+  };
+
+  // Confirm supplier switch & clear conflicting items
+  const confirmSupplierSwitch = () => {
+    if (!pendingSupplierId) return;
+    const newSupplierObj = loaderData.suppliers.find((s) => s.value === pendingSupplierId);
+    const newLeadTime = newSupplierObj?.leadTime || 14;
+
+    const retainedItems = items.filter((item) => {
+      const rule = loaderData.availableRules.find((r) => r.variantId === item.variantId);
+      return rule && rule.supplierId === pendingSupplierId;
+    });
+
+    setItems(retainedItems);
+    setSupplierId(pendingSupplierId);
+    setSupplierName(newSupplierObj?.label || "");
+    setExpectedArrival(
+      new Date(Date.now() + newLeadTime * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+    );
+    setPendingSupplierId(null);
+
+    shopify.toast.show(
+      retainedItems.length > 0
+        ? `Switched to ${newSupplierObj?.label}. Retained ${retainedItems.length} matching items.`
+        : `Switched to ${newSupplierObj?.label}. Line items cleared to prevent supplier mixing.`,
+    );
+  };
+
+  // Products available from the currently selected supplier
+  const supplierAvailableRules = useMemo(() => {
+    return loaderData.availableRules.filter((r) => r.supplierId === supplierId);
+  }, [loaderData.availableRules, supplierId]);
+
+  // Search filtered products in modal
+  const filteredModalRules = useMemo(() => {
+    if (!addSearchQuery.trim()) return supplierAvailableRules;
+    const terms = addSearchQuery.toLowerCase().trim().split(/\s+/);
+    return supplierAvailableRules.filter((item) => {
+      const haystack = `${item.title} ${item.variantTitle} ${item.sku} ${item.supplierSku}`.toLowerCase();
+      return terms.every((t) => haystack.includes(t));
+    });
+  }, [supplierAvailableRules, addSearchQuery]);
+
+  // Add Product to PO
+  const handleAddProductToPO = (rule: AvailableRuleItem) => {
+    const isAlreadyAdded = items.some((i) => i.variantId === rule.variantId);
+    if (isAlreadyAdded) {
+      shopify.toast.show(`${rule.title} is already on this Purchase Order.`);
+      return;
+    }
+
+    const initialDeficit = Math.max(rule.minOrderQty, rule.packSize * 2);
+    const newItem: DraftPOItem = {
+      id: rule.ruleId,
+      variantId: rule.variantId,
+      inventoryItemId: rule.inventoryItemId,
+      title: rule.title,
+      variantTitle: rule.variantTitle,
+      sku: rule.sku,
+      supplierSku: rule.supplierSku,
+      imageUrl: rule.imageUrl,
+      packSize: rule.packSize,
+      calculatedDeficit: initialDeficit,
+      orderQuantity: initialDeficit,
+      unitCost: rule.unitCost,
+    };
+
+    setItems((prev) => [...prev, newItem]);
+    shopify.toast.show(`Added ${rule.title} (${rule.sku}) to Purchase Order.`);
   };
 
   // Calculate totals
@@ -312,52 +405,65 @@ export default function PurchaseOrderDraftEditor() {
 
   const handleExportCSV = () => {
     const rows: (string | number)[][] = [
-      ["PO Number", "Supplier", "Expected Arrival", "SKU", "Supplier SKU", "Title", "Variant", "Quantity Ordered", "Case Pack", "Unit Cost ($)", "Subtotal ($)"],
-      ...items.map((i) => [
-        poNumber,
-        supplierName,
-        expectedArrival || "TBD",
-        i.sku,
-        i.supplierSku,
-        i.title,
-        i.variantTitle,
-        i.orderQuantity,
-        i.packSize,
-        i.unitCost.toFixed(2),
-        (i.orderQuantity * i.unitCost).toFixed(2),
-      ]),
+      ["PO Number", poNumber],
+      ["Supplier", supplierName],
+      ["Expected Arrival", expectedArrival],
+      ["Notes", notes],
+      [],
+      ["Product Title", "Variant", "SKU", "Supplier SKU", "Case Pack", "Order Quantity", "Unit Cost", "Subtotal"],
     ];
+
+    items.forEach((item) => {
+      rows.push([
+        item.title,
+        item.variantTitle,
+        item.sku,
+        item.supplierSku,
+        item.packSize,
+        item.orderQuantity,
+        item.unitCost.toFixed(2),
+        (item.orderQuantity * item.unitCost).toFixed(2),
+      ]);
+    });
+
+    rows.push([]);
+    rows.push(["Total Units", totals.totalUnits]);
+    rows.push(["Total Cartons", totals.totalCases]);
+    rows.push(["Estimated Total Cost", `$${totals.totalCost.toFixed(2)}`]);
 
     const csvContent =
       "data:text/csv;charset=utf-8," +
-      rows.map((e) => e.map((val) => `"${String(val).replace(/"/g, '""')}"`).join(",")).join("\n");
+      rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `${poNumber}_Draft_${supplierName.replace(/\s+/g, "_")}.csv`);
+    link.setAttribute("download", `${poNumber}_${supplierName.replace(/\s+/g, "_")}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
 
-    shopify.toast.show(`Exported ${poNumber} to CSV.`);
+    shopify.toast.show(`Exported ${poNumber} CSV file.`);
   };
 
   return (
     <Page
       backAction={{
-        content: "Back to Replenishment",
-        onAction: () => navigate("/app"),
+        content: "Purchase Orders",
+        onAction: () => navigate("/app/purchase-orders"),
       }}
-      title={`${poNumber} (Draft Purchase Order)`}
-      subtitle={`Supplier: ${supplierName} • Created from replenishment recommendations`}
+      title={`Create Purchase Order (${poNumber})`}
+      subtitle={`Supplier: ${supplierName} • Order status will be created as Draft`}
       primaryAction={{
-        content: isSubmitting ? "Creating & Issuing..." : "Save & Issue PO (Mark Ordered)",
+        content: "Issue PO (Save & Mark Ordered)",
+        icon: CheckIcon,
         loading: isSubmitting,
         onAction: () => handleSaveDraft("ORDERED"),
       }}
       secondaryActions={[
         {
-          content: "Save as Draft Only",
+          content: "Save as Draft",
+          loading: isSubmitting,
           onAction: () => handleSaveDraft("DRAFT"),
         },
         {
@@ -368,10 +474,17 @@ export default function PurchaseOrderDraftEditor() {
       ]}
     >
       <BlockStack gap="400">
+        {loaderData.skippedCrossSupplierCount > 0 && (
+          <Banner tone="warning" onDismiss={() => {}}>
+            <Text as="p" variant="bodyMd">
+              {loaderData.skippedCrossSupplierCount} selected item(s) belong to a different supplier and were excluded to prevent multi-supplier contamination. A single PO can only be addressed to one supplier.
+            </Text>
+          </Banner>
+        )}
+
         <Banner tone="info">
           <Text as="p" variant="bodyMd">
-            Quantities are pre-filled based on your replenishment deficit and supplier pack sizes.
-            You can manually override any quantity directly in the table below before saving to PostgreSQL.
+            Quantities are pre-filled based on replenishment deficits and case-pack multiples. You can override quantities, add products, or remove line items before saving.
           </Text>
         </Banner>
 
@@ -381,19 +494,27 @@ export default function PurchaseOrderDraftEditor() {
             <Card padding="400">
               <BlockStack gap="300">
                 <InlineStack align="space-between" blockAlign="center">
-                  <Text as="h2" variant="headingMd">
-                    Order Line Items ({items.length})
-                  </Text>
-                  <Text as="span" variant="bodySm" tone="subdued">
-                    Rounded to Case Pack Multiples
-                  </Text>
+                  <InlineStack gap="200" blockAlign="center">
+                    <Text as="h2" variant="headingMd">
+                      Order Line Items ({items.length})
+                    </Text>
+                    <Badge tone="info">{supplierName}</Badge>
+                  </InlineStack>
+                  <Button
+                    icon={PlusIcon}
+                    variant="primary"
+                    onClick={() => setIsAddModalOpen(true)}
+                  >
+                    Add Product
+                  </Button>
                 </InlineStack>
+
+                <Divider />
 
                 <BlockStack gap="200">
                   {items.map((item) => {
                     const lineCases = Math.ceil(item.orderQuantity / item.packSize);
                     const lineSubtotal = item.orderQuantity * item.unitCost;
-                    const isCasePackAligned = item.orderQuantity % item.packSize === 0;
 
                     return (
                       <Card key={item.id} padding="300" background="bg-surface-secondary">
@@ -467,9 +588,20 @@ export default function PurchaseOrderDraftEditor() {
                   })}
 
                   {items.length === 0 && (
-                    <Text as="p" tone="subdued" alignment="center">
-                      All line items removed. Return to replenishment to add items.
-                    </Text>
+                    <Box padding="600">
+                      <BlockStack align="center" inlineAlign="center" gap="300">
+                        <Text as="p" tone="subdued" alignment="center">
+                          No line items on this Purchase Order.
+                        </Text>
+                        <Button
+                          icon={PlusIcon}
+                          variant="primary"
+                          onClick={() => setIsAddModalOpen(true)}
+                        >
+                          Add Products from {supplierName}
+                        </Button>
+                      </BlockStack>
+                    </Box>
                   )}
                 </BlockStack>
               </BlockStack>
@@ -516,11 +648,11 @@ export default function PurchaseOrderDraftEditor() {
 
                     <Divider />
 
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="headingMd">
-                        Total PO Valuation:
+                    <InlineStack align="space-between" blockAlign="center">
+                      <Text as="span" variant="bodyMd" fontWeight="bold">
+                        Estimated Total:
                       </Text>
-                      <Text as="span" variant="headingMd" tone="critical">
+                      <Text as="span" variant="headingMd" tone="success">
                         ${totals.totalCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </Text>
                     </InlineStack>
@@ -528,7 +660,7 @@ export default function PurchaseOrderDraftEditor() {
                 </BlockStack>
               </Card>
 
-              {/* Delivery & Logistics */}
+              {/* Supplier & Logistics Settings */}
               <Card>
                 <BlockStack gap="300">
                   <Text as="h3" variant="headingSm">
@@ -539,11 +671,8 @@ export default function PurchaseOrderDraftEditor() {
                     label="Supplier"
                     options={loaderData.suppliers}
                     value={supplierId}
-                    onChange={(val) => {
-                      setSupplierId(val);
-                      const s = loaderData.suppliers.find((sup) => sup.value === val);
-                      if (s) setSupplierName(s.label);
-                    }}
+                    onChange={handleSupplierChange}
+                    helpText="Changing supplier filters available products to avoid mixed vendor POs."
                   />
 
                   <TextField
@@ -552,7 +681,7 @@ export default function PurchaseOrderDraftEditor() {
                     value={expectedArrival}
                     onChange={setExpectedArrival}
                     autoComplete="off"
-                    helpText={`Lead time: ${loaderData.defaultLeadTime} days`}
+                    helpText={`Calculated from ${supplierName} lead time.`}
                   />
 
                   <TextField
@@ -568,6 +697,138 @@ export default function PurchaseOrderDraftEditor() {
           </Layout.Section>
         </Layout>
       </BlockStack>
+
+      {/* Modal: Add Product to Purchase Order */}
+      <Modal
+        open={isAddModalOpen}
+        onClose={() => {
+          setIsAddModalOpen(false);
+          setAddSearchQuery("");
+        }}
+        title={`Add Product from ${supplierName}`}
+        primaryAction={{
+          content: "Done",
+          onAction: () => {
+            setIsAddModalOpen(false);
+            setAddSearchQuery("");
+          },
+        }}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            <TextField
+              label="Search products or SKU"
+              value={addSearchQuery}
+              onChange={setAddSearchQuery}
+              prefix={<Icon source={SearchIcon} />}
+              placeholder="Search by title, variant, or SKU..."
+              autoComplete="off"
+              clearButton
+              onClearButtonClick={() => setAddSearchQuery("")}
+            />
+
+            <Text as="p" variant="bodySm" tone="subdued">
+              Showing {filteredModalRules.length} product(s) sourced from {supplierName}.
+            </Text>
+
+            <div style={{ maxHeight: "380px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px" }}>
+              {filteredModalRules.map((rule) => {
+                const isAlreadyInPo = items.some((i) => i.variantId === rule.variantId);
+
+                return (
+                  <div
+                    key={rule.ruleId}
+                    style={{
+                      padding: "12px 16px",
+                      borderBottom: "1px solid #f1f2f3",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                    }}
+                  >
+                    <InlineStack gap="300" blockAlign="center">
+                      <Thumbnail
+                        source={rule.imageUrl}
+                        alt={rule.title}
+                        size="small"
+                      />
+                      <BlockStack gap="050">
+                        <Text as="p" variant="bodySm" fontWeight="bold">
+                          {rule.title}
+                        </Text>
+                        <Text as="p" variant="bodyXs" tone="subdued">
+                          {rule.variantTitle} • SKU: {rule.sku}
+                        </Text>
+                        <InlineStack gap="150">
+                          <Badge tone="info">{`Pack of ${rule.packSize}`}</Badge>
+                          <Badge tone="new">{`MOQ: ${rule.minOrderQty}`}</Badge>
+                          <Text as="span" variant="bodyXs" tone="subdued">
+                            Unit Cost: ${rule.unitCost.toFixed(2)}
+                          </Text>
+                        </InlineStack>
+                      </BlockStack>
+                    </InlineStack>
+
+                    <div>
+                      {isAlreadyInPo ? (
+                        <Badge tone="success">Added</Badge>
+                      ) : (
+                        <Button
+                          icon={PlusIcon}
+                          size="slim"
+                          onClick={() => handleAddProductToPO(rule)}
+                        >
+                          Add
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {filteredModalRules.length === 0 && (
+                <Box padding="600">
+                  <Text as="p" alignment="center" tone="subdued">
+                    No products found matching &ldquo;{addSearchQuery}&rdquo; for {supplierName}.
+                  </Text>
+                </Box>
+              )}
+            </div>
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
+
+      {/* Confirmation Modal: Prevent Multi-Supplier Contamination */}
+      <Modal
+        open={Boolean(pendingSupplierId)}
+        onClose={() => setPendingSupplierId(null)}
+        title="Switch Supplier & Clear Items?"
+        primaryAction={{
+          content: "Switch Supplier & Clear Items",
+          destructive: true,
+          onAction: confirmSupplierSwitch,
+        }}
+        secondaryActions={[
+          {
+            content: "Keep Current Supplier",
+            onAction: () => setPendingSupplierId(null),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            <Banner tone="warning">
+              <Text as="p" variant="bodyMd">
+                A single Purchase Order can only be sent to one vendor. Your current draft order contains {items.length} line item(s) from <strong>{supplierName}</strong>.
+              </Text>
+            </Banner>
+            <Text as="p" variant="bodyMd">
+              Switching to <strong>{loaderData.suppliers.find((s) => s.value === pendingSupplierId)?.label}</strong> will remove conflicting line items from your draft. Would you like to proceed?
+            </Text>
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
     </Page>
   );
 }

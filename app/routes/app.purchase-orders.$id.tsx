@@ -29,23 +29,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
-// Fallback image lookup
-const CATALOG_IMAGES: Record<string, string> = {
-  "gid://shopify/ProductVariant/44129481923":
-    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-  "gid://shopify/ProductVariant/44129481924":
-    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-  "gid://shopify/ProductVariant/44129481925":
-    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
-  "gid://shopify/ProductVariant/44129481926":
-    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
-  "gid://shopify/ProductVariant/44129481927":
-    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-  "gid://shopify/ProductVariant/44129481928":
-    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
-  "gid://shopify/ProductVariant/44129481929":
-    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-};
+import { getCatalogItem } from "../catalog";
 
 export interface ReceivingLineItem {
   id: string;
@@ -130,28 +114,29 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         day: "numeric",
         year: "numeric",
       }),
-      items: po.items.map((item) => ({
-        id: item.id,
-        variantId: item.variantId,
-        inventoryItemId: item.inventoryItemId || "",
-        title: item.title,
-        variantTitle: "Standard",
-        sku: item.sku || "",
-        supplierSku: item.sku || "",
-        imageUrl:
-          CATALOG_IMAGES[item.variantId] ||
-          "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-        unitCost: Number(item.unitCost),
-        orderedQty: item.quantityOrdered,
-        receivedQty: item.quantityReceived ?? 0,
-      })),
+      items: po.items.map((item) => {
+        const catalog = getCatalogItem(item.variantId);
+        return {
+          id: item.id,
+          variantId: item.variantId,
+          inventoryItemId: item.inventoryItemId || catalog.inventoryItemId || "",
+          title: item.title || catalog.title,
+          variantTitle: catalog.variantTitle || "Standard",
+          sku: item.sku || catalog.sku,
+          supplierSku: item.sku || catalog.sku,
+          imageUrl: catalog.imageUrl,
+          unitCost: Number(item.unitCost),
+          orderedQty: item.quantityOrdered,
+          receivedQty: item.quantityReceived ?? 0,
+        };
+      }),
     },
     shopDomain: session.shop,
   };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = String(formData.get("intent") || "COMMIT_RECEIVED");
   const poId = String(formData.get("poId"));
@@ -182,6 +167,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       receivedQty: number;
     }>;
 
+    // Fetch previous state for incremental delta calculation
+    const existingItems = await prisma.purchaseOrderItem.findMany({
+      where: { purchaseOrderId: poId },
+    });
+
     for (const item of itemsToUpdate) {
       await prisma.purchaseOrderItem.update({
         where: { id: item.id },
@@ -202,7 +192,80 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       data: { status: newStatus },
     });
 
-    return { ok: true, status: newStatus, message: `Loading dock audit updated: ${newStatus}` };
+    // Step 9: Two-Way Live Shopify Storefront Inventory Adjustment
+    let liveSyncStatus = "";
+    try {
+      const locResponse = await admin.graphql(`
+        #graphql
+        query GetStorePrimaryLocation {
+          locations(first: 1) {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+        }
+      `);
+      const locData = await locResponse.json();
+      const primaryLocationId = locData.data?.locations?.edges?.[0]?.node?.id;
+
+      if (primaryLocationId) {
+        const changes: Array<{ inventoryItemId: string; locationId: string; delta: number }> = [];
+
+        for (const update of itemsToUpdate) {
+          const prevItem = existingItems.find((i) => i.id === update.id);
+          const prevReceived = prevItem?.quantityReceived || 0;
+          const delta = update.receivedQty - prevReceived;
+
+          if (delta > 0 && prevItem?.inventoryItemId && prevItem.inventoryItemId.startsWith("gid://shopify/InventoryItem/")) {
+            changes.push({
+              inventoryItemId: prevItem.inventoryItemId,
+              locationId: primaryLocationId,
+              delta,
+            });
+          }
+        }
+
+        if (changes.length > 0) {
+          const adjResponse = await admin.graphql(
+            `#graphql
+            mutation AdjustInventoryQuantities($input: InventoryAdjustQuantitiesInput!) {
+              inventoryAdjustQuantities(input: $input) {
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }`,
+            {
+              variables: {
+                input: {
+                  reason: "received",
+                  name: "available",
+                  changes,
+                },
+              },
+            }
+          );
+          const adjData = await adjResponse.json();
+          if (adjData.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
+            console.log("[Shopify Inventory Sync Notice]", adjData.data.inventoryAdjustQuantities.userErrors[0].message);
+          } else {
+            liveSyncStatus = " • Synced to Shopify available inventory";
+          }
+        }
+      }
+    } catch {
+      console.log("[Shopify Live Sync] Dock receipt recorded in database. Storefront live sync skipped (offline mode).");
+    }
+
+    return {
+      ok: true,
+      status: newStatus,
+      message: `Loading dock audit updated: ${newStatus}${liveSyncStatus}`,
+    };
   }
 
   return { ok: false, error: "Unknown action intent." };

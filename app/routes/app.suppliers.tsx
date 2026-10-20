@@ -24,399 +24,20 @@ import {
   Icon,
   Checkbox,
 } from "@shopify/polaris";
-import { PlusIcon, EditIcon, LinkIcon, SearchIcon, ProductIcon } from "@shopify/polaris-icons";
+import { PlusIcon, EditIcon, LinkIcon, SearchIcon, ProductIcon, RefreshIcon } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { ingestShopifyProduct } from "../webhook-handler.server";
 
-// Standard Catalog Variants (45 realistic items across diverse apparel and accessories)
-export const CATALOG_VARIANTS = [
-  // 1-5: Heavyweight Boxy Hoodies
-  {
-    variantId: "gid://shopify/ProductVariant/44129481923",
-    productId: "gid://shopify/Product/84920192810",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Vintage Black / Large",
-    sku: "HDY-BLK-L",
-    defaultCost: 18.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481927",
-    productId: "gid://shopify/Product/84920192810",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Off-White / Medium",
-    sku: "HDY-WHT-M",
-    defaultCost: 18.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481930",
-    productId: "gid://shopify/Product/84920192810",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Washed Maroon / XL",
-    sku: "HDY-MRN-XL",
-    defaultCost: 18.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481931",
-    productId: "gid://shopify/Product/84920192810",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Forest Green / Small",
-    sku: "HDY-GRN-S",
-    defaultCost: 18.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481932",
-    productId: "gid://shopify/Product/84920192810",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Slate Blue / 2XL",
-    sku: "HDY-BLU-2XL",
-    defaultCost: 19.5,
-  },
+import {
+  CATALOG_VARIANTS,
+  getCatalogItem,
+  searchCatalog,
+  type CatalogVariant,
+} from "../catalog";
 
-  // 6-9: Organic Cotton Ribbed Beanies
-  {
-    variantId: "gid://shopify/ProductVariant/44129481924",
-    productId: "gid://shopify/Product/84920192811",
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Olive Green / One Size",
-    sku: "BN-OLV-OS",
-    defaultCost: 6.2,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481933",
-    productId: "gid://shopify/Product/84920192811",
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Charcoal Grey / One Size",
-    sku: "BN-CHR-OS",
-    defaultCost: 6.2,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481934",
-    productId: "gid://shopify/Product/84920192811",
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Mustard Gold / One Size",
-    sku: "BN-GLD-OS",
-    defaultCost: 6.2,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481935",
-    productId: "gid://shopify/Product/84920192811",
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Midnight Black / One Size",
-    sku: "BN-BLK-OS",
-    defaultCost: 6.2,
-  },
-
-  // 10-13: Canvas Chore Jackets
-  {
-    variantId: "gid://shopify/ProductVariant/44129481925",
-    productId: "gid://shopify/Product/84920192812",
-    title: "Canvas Chore Jacket",
-    variantTitle: "Caramel Tan / XL",
-    sku: "JKT-CRM-XL",
-    defaultCost: 32.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481936",
-    productId: "gid://shopify/Product/84920192812",
-    title: "Canvas Chore Jacket",
-    variantTitle: "Washed Navy / Large",
-    sku: "JKT-NVY-L",
-    defaultCost: 32.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481937",
-    productId: "gid://shopify/Product/84920192812",
-    title: "Canvas Chore Jacket",
-    variantTitle: "Sage Green / Medium",
-    sku: "JKT-SGE-M",
-    defaultCost: 32.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481938",
-    productId: "gid://shopify/Product/84920192812",
-    title: "Canvas Chore Jacket",
-    variantTitle: "Coal Black / Small",
-    sku: "JKT-BLK-S",
-    defaultCost: 32.0,
-  },
-
-  // 14-17: Thermal Waffle Crewnecks
-  {
-    variantId: "gid://shopify/ProductVariant/44129481926",
-    productId: "gid://shopify/Product/84920192813",
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Heather Grey / Medium",
-    sku: "WFL-GRY-M",
-    defaultCost: 14.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481939",
-    productId: "gid://shopify/Product/84920192813",
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Off-White / Large",
-    sku: "WFL-WHT-L",
-    defaultCost: 14.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481940",
-    productId: "gid://shopify/Product/84920192813",
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Olive Drab / Small",
-    sku: "WFL-OLV-S",
-    defaultCost: 14.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481941",
-    productId: "gid://shopify/Product/84920192813",
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Midnight Black / XL",
-    sku: "WFL-BLK-XL",
-    defaultCost: 14.0,
-  },
-
-  // 18-21: Fleece Sweatpants
-  {
-    variantId: "gid://shopify/ProductVariant/44129481928",
-    productId: "gid://shopify/Product/84920192814",
-    title: "Fleece Sweatpants",
-    variantTitle: "Navy Blue / Small",
-    sku: "SWT-NVY-S",
-    defaultCost: 16.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481942",
-    productId: "gid://shopify/Product/84920192814",
-    title: "Fleece Sweatpants",
-    variantTitle: "Heather Oatmeal / Medium",
-    sku: "SWT-OAT-M",
-    defaultCost: 16.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481943",
-    productId: "gid://shopify/Product/84920192814",
-    title: "Fleece Sweatpants",
-    variantTitle: "Vintage Black / Large",
-    sku: "SWT-BLK-L",
-    defaultCost: 16.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481944",
-    productId: "gid://shopify/Product/84920192814",
-    title: "Fleece Sweatpants",
-    variantTitle: "Moss Green / XL",
-    sku: "SWT-GRN-XL",
-    defaultCost: 16.0,
-  },
-
-  // 22-24: Merino Wool Scarves
-  {
-    variantId: "gid://shopify/ProductVariant/44129481929",
-    productId: "gid://shopify/Product/84920192815",
-    title: "Merino Wool Scarf",
-    variantTitle: "Charcoal / One Size",
-    sku: "SCF-CHR-OS",
-    defaultCost: 14.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481945",
-    productId: "gid://shopify/Product/84920192815",
-    title: "Merino Wool Scarf",
-    variantTitle: "Camel Beige / One Size",
-    sku: "SCF-CML-OS",
-    defaultCost: 14.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481946",
-    productId: "gid://shopify/Product/84920192815",
-    title: "Merino Wool Scarf",
-    variantTitle: "Deep Burgundy / One Size",
-    sku: "SCF-BUR-OS",
-    defaultCost: 14.0,
-  },
-
-  // 25-29: Heavyweight Oversized Tees
-  {
-    variantId: "gid://shopify/ProductVariant/44129481947",
-    productId: "gid://shopify/Product/84920192816",
-    title: "Heavyweight Oversized Tee",
-    variantTitle: "Vintage White / Medium",
-    sku: "TEE-OVS-WHT-M",
-    defaultCost: 9.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481948",
-    productId: "gid://shopify/Product/84920192816",
-    title: "Heavyweight Oversized Tee",
-    variantTitle: "Faded Black / Large",
-    sku: "TEE-OVS-BLK-L",
-    defaultCost: 9.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481949",
-    productId: "gid://shopify/Product/84920192816",
-    title: "Heavyweight Oversized Tee",
-    variantTitle: "Sage Green / XL",
-    sku: "TEE-OVS-SGE-XL",
-    defaultCost: 9.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481950",
-    productId: "gid://shopify/Product/84920192816",
-    title: "Heavyweight Oversized Tee",
-    variantTitle: "Clay Terra / Small",
-    sku: "TEE-OVS-TER-S",
-    defaultCost: 9.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481951",
-    productId: "gid://shopify/Product/84920192816",
-    title: "Heavyweight Oversized Tee",
-    variantTitle: "Washed Navy / 2XL",
-    sku: "TEE-OVS-NVY-2XL",
-    defaultCost: 10.0,
-  },
-
-  // 30-33: Relaxed Fit Chino Pants
-  {
-    variantId: "gid://shopify/ProductVariant/44129481952",
-    productId: "gid://shopify/Product/84920192817",
-    title: "Relaxed Fit Chino Pant",
-    variantTitle: "Khaki Tan / 32x32",
-    sku: "CHN-KHK-32",
-    defaultCost: 22.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481953",
-    productId: "gid://shopify/Product/84920192817",
-    title: "Relaxed Fit Chino Pant",
-    variantTitle: "Olive Drab / 34x32",
-    sku: "CHN-OLV-34",
-    defaultCost: 22.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481954",
-    productId: "gid://shopify/Product/84920192817",
-    title: "Relaxed Fit Chino Pant",
-    variantTitle: "Charcoal Slate / 30x30",
-    sku: "CHN-CHR-30",
-    defaultCost: 22.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481955",
-    productId: "gid://shopify/Product/84920192817",
-    title: "Relaxed Fit Chino Pant",
-    variantTitle: "Dark Navy / 36x32",
-    sku: "CHN-NVY-36",
-    defaultCost: 22.0,
-  },
-
-  // 34-36: Down Quilted Puffer Vests
-  {
-    variantId: "gid://shopify/ProductVariant/44129481956",
-    productId: "gid://shopify/Product/84920192818",
-    title: "Down Quilted Puffer Vest",
-    variantTitle: "Matte Black / Medium",
-    sku: "VST-BLK-M",
-    defaultCost: 28.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481957",
-    productId: "gid://shopify/Product/84920192818",
-    title: "Down Quilted Puffer Vest",
-    variantTitle: "Deep Forest / Large",
-    sku: "VST-FOR-L",
-    defaultCost: 28.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481958",
-    productId: "gid://shopify/Product/84920192818",
-    title: "Down Quilted Puffer Vest",
-    variantTitle: "Sand Dune / XL",
-    sku: "VST-SND-XL",
-    defaultCost: 28.0,
-  },
-
-  // 37-39: 6-Panel Twill Caps
-  {
-    variantId: "gid://shopify/ProductVariant/44129481959",
-    productId: "gid://shopify/Product/84920192819",
-    title: "6-Panel Twill Dad Cap",
-    variantTitle: "Washed Olive / Adjustable",
-    sku: "CAP-TWL-OLV",
-    defaultCost: 8.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481960",
-    productId: "gid://shopify/Product/84920192819",
-    title: "6-Panel Twill Dad Cap",
-    variantTitle: "Vintage Navy / Adjustable",
-    sku: "CAP-TWL-NVY",
-    defaultCost: 8.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481961",
-    productId: "gid://shopify/Product/84920192819",
-    title: "6-Panel Twill Dad Cap",
-    variantTitle: "Desert Tan / Adjustable",
-    sku: "CAP-TWL-TAN",
-    defaultCost: 8.0,
-  },
-
-  // 40-41: Heavyweight Canvas Utility Totes
-  {
-    variantId: "gid://shopify/ProductVariant/44129481962",
-    productId: "gid://shopify/Product/84920192820",
-    title: "Heavyweight Canvas Utility Tote",
-    variantTitle: "Natural Canvas / Large",
-    sku: "BAG-UTE-NAT",
-    defaultCost: 12.5,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481963",
-    productId: "gid://shopify/Product/84920192820",
-    title: "Heavyweight Canvas Utility Tote",
-    variantTitle: "Coal Black / Large",
-    sku: "BAG-UTE-BLK",
-    defaultCost: 12.5,
-  },
-
-  // 42-43: Corduroy Overshirt Jackets
-  {
-    variantId: "gid://shopify/ProductVariant/44129481964",
-    productId: "gid://shopify/Product/84920192821",
-    title: "Corduroy Overshirt Jacket",
-    variantTitle: "Cinnamon Brown / Medium",
-    sku: "SHRT-CDR-BRN-M",
-    defaultCost: 26.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481965",
-    productId: "gid://shopify/Product/84920192821",
-    title: "Corduroy Overshirt Jacket",
-    variantTitle: "Dark Teal / Large",
-    sku: "SHRT-CDR-TEL-L",
-    defaultCost: 26.0,
-  },
-
-  // 44-45: French Terry Full-Zip Hoodies
-  {
-    variantId: "gid://shopify/ProductVariant/44129481966",
-    productId: "gid://shopify/Product/84920192822",
-    title: "French Terry Zip Hoodie",
-    variantTitle: "Heather Grey / Large",
-    sku: "ZIP-HDY-GRY-L",
-    defaultCost: 21.0,
-  },
-  {
-    variantId: "gid://shopify/ProductVariant/44129481967",
-    productId: "gid://shopify/Product/84920192822",
-    title: "French Terry Zip Hoodie",
-    variantTitle: "Deep Navy / XL",
-    sku: "ZIP-HDY-NVY-XL",
-    defaultCost: 21.0,
-  },
-];
+export { CATALOG_VARIANTS };
 
 export interface SupplierItem {
   id: string;
@@ -490,12 +111,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }));
 
   const rules: RuleItem[] = rulesDb.map((r) => {
-    const catalog = CATALOG_VARIANTS.find((c) => c.variantId === r.variantId) || {
-      title: "Product " + r.variantId.slice(-6),
-      variantTitle: "Variant",
-      sku: r.supplierSku || "SKU-" + r.id.slice(0, 6),
-      defaultCost: Number(r.unitCost),
-    };
+    const catalog = getCatalogItem(r.variantId);
 
     return {
       id: r.id,
@@ -516,7 +132,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const formData = await request.formData();
@@ -591,8 +207,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const leadTimeStr = formData.get("leadTimeDays");
     const leadTimeDays = leadTimeStr ? parseInt(String(leadTimeStr), 10) : null;
 
-    const catalog = CATALOG_VARIANTS.find((c) => c.variantId === variantId);
-    const supplierSku = catalog?.sku || "SKU-AUTO";
+    const catalog = getCatalogItem(variantId);
+    const supplierSku = catalog.sku;
 
     await prisma.variantSupplierRule.upsert({
       where: {
@@ -608,11 +224,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         minOrderQty,
         leadTimeDays,
         supplierSku,
+        inventoryItemId: catalog.inventoryItemId,
       },
       create: {
         shop,
         variantId,
-        productId: catalog?.productId || "gid://shopify/Product/default",
+        productId: catalog.productId,
+        inventoryItemId: catalog.inventoryItemId,
         supplierId,
         unitCost,
         packSize,
@@ -662,6 +280,71 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     return { ok: true, action: "sku_assigned", variantId };
+  }
+
+  // Manual Live Store Catalog Ingestion from Shopify
+  if (intent === "SYNC_FROM_SHOPIFY") {
+    try {
+      const response = await admin.graphql(`
+        #graphql
+        query GetAllStoreProductsForSync {
+          products(first: 50) {
+            edges {
+              node {
+                id
+                title
+                vendor
+                variants(first: 50) {
+                  edges {
+                    node {
+                      id
+                      title
+                      sku
+                      price
+                      inventoryItem {
+                        id
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `);
+      const resJson = await response.json();
+      const productEdges = resJson.data?.products?.edges || [];
+      let importedProducts = 0;
+
+      for (const edge of productEdges) {
+        const prod = edge.node;
+        await ingestShopifyProduct(
+          {
+            id: prod.id,
+            title: prod.title,
+            vendor: prod.vendor,
+            variants: prod.variants?.edges?.map((ve: any) => ({
+              id: ve.node.id,
+              title: ve.node.title,
+              sku: ve.node.sku,
+              price: ve.node.price,
+              inventory_item_id: ve.node.inventoryItem?.id,
+            })),
+          },
+          shop
+        );
+        importedProducts++;
+      }
+
+      return {
+        ok: true,
+        action: "synced",
+        message: `Synced ${importedProducts} live product(s) from Shopify store.`,
+      };
+    } catch (e: any) {
+      console.error("[Live Store Sync Error]", e);
+      return { ok: false, error: "Failed to query Shopify Admin GraphQL API." };
+    }
   }
 
   return { ok: false, error: "Unknown action intent." };
@@ -871,6 +554,11 @@ export default function SuppliersPage() {
     return rules.filter((r) => r.supplierId === activeSupplierForSkus.id);
   }, [rules, activeSupplierForSkus]);
 
+  const handleSyncStoreProducts = () => {
+    shopify.toast.show("Querying products from live Shopify store...");
+    submit({ intent: "SYNC_FROM_SHOPIFY" }, { method: "post" });
+  };
+
   return (
     <Page
       title="Suppliers"
@@ -880,6 +568,14 @@ export default function SuppliersPage() {
         icon: PlusIcon,
         onAction: handleOpenCreateModal,
       }}
+      secondaryActions={[
+        {
+          content: "Sync Store Products",
+          icon: RefreshIcon,
+          loading: isSubmitting,
+          onAction: handleSyncStoreProducts,
+        },
+      ]}
     >
       <BlockStack gap="400">
         {/* Executive KPI Metric Strip */}

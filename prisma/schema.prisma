@@ -181,3 +181,22 @@ model HistoricalSyncJob {
 
   @@index([shop])
 }
+
+// ---------------------------------------------------------
+// 8. Global Merchant App Preferences & Settings
+// ---------------------------------------------------------
+model AppSettings {
+  id                     String   @id @default(uuid())
+  shop                   String   @unique
+  defaultLookbackWindow  Int      @default(30) // 7, 14, 30, 90
+  defaultSafetyStockDays Int      @default(7)  // Buffer coverage days
+  defaultLeadTimeDays    Int      @default(14) // Default supplier lead time
+  autoRoundCasePacks     Boolean  @default(true)
+  emailAlerts            Boolean  @default(false)
+  alertEmail             String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@index([shop])
+}
+

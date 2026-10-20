@@ -39,74 +39,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
-// Fallback catalog defaults for product imagery & stockOnHand during local development
-const CATALOG_DEFAULTS: Record<
-  string,
-  {
-    title: string;
-    variantTitle: string;
-    sku: string;
-    imageUrl: string;
-    stockOnHand: number;
-  }
-> = {
-  "gid://shopify/ProductVariant/44129481923": {
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Vintage Black / Large",
-    sku: "HDY-BLK-L",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    stockOnHand: 32,
-  },
-  "gid://shopify/ProductVariant/44129481924": {
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Olive Green / One Size",
-    sku: "BN-OLV-OS",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-    stockOnHand: 18,
-  },
-  "gid://shopify/ProductVariant/44129481925": {
-    title: "Canvas Chore Jacket",
-    variantTitle: "Caramel Tan / XL",
-    sku: "JKT-CRM-XL",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
-    stockOnHand: 8,
-  },
-  "gid://shopify/ProductVariant/44129481926": {
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Heather Grey / Medium",
-    sku: "WFL-GRY-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
-    stockOnHand: 14,
-  },
-  "gid://shopify/ProductVariant/44129481927": {
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Off-White / Medium",
-    sku: "HDY-WHT-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    stockOnHand: 140,
-  },
-  "gid://shopify/ProductVariant/44129481928": {
-    title: "French Terry Sweatpants",
-    variantTitle: "Sage Green / Small",
-    sku: "SWP-SGE-S",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
-    stockOnHand: 520, // Overstocked example
-  },
-  "gid://shopify/ProductVariant/44129481929": {
-    title: "Chunky Knit Scarf",
-    variantTitle: "Charcoal / One Size",
-    sku: "SCF-CHR-OS",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-    stockOnHand: 220, // Overstocked example
-  },
-};
+import { getCatalogItem } from "../catalog";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -160,16 +93,29 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
   const openPoItems = openPurchaseOrders.flatMap((po) => po.items);
 
+  // Fetch all received quantities across ALL non-cancelled purchase orders (Dock Receiving Loop)
+  const allReceivedItems = await prisma.purchaseOrderItem.findMany({
+    where: {
+      purchaseOrder: {
+        status: { not: "CANCELLED" },
+      },
+      quantityReceived: { gt: 0 },
+    },
+    select: {
+      variantId: true,
+      quantityReceived: true,
+    },
+  });
+
+  const receivedByVariant: Record<string, number> = {};
+  for (const item of allReceivedItems) {
+    receivedByVariant[item.variantId] =
+      (receivedByVariant[item.variantId] || 0) + item.quantityReceived;
+  }
+
   // 6. Map PostgreSQL records to ReplenishmentItem entities
   const items: ReplenishmentItem[] = rulesDb.map((rule) => {
-    const catalog = CATALOG_DEFAULTS[rule.variantId] || {
-      title: "Product " + (rule.supplierSku || rule.id),
-      variantTitle: "Standard",
-      sku: rule.supplierSku || "SKU-" + rule.id.slice(0, 6),
-      imageUrl:
-        "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
-      stockOnHand: 25,
-    };
+    const catalog = getCatalogItem(rule.variantId);
 
     const variantSales = salesDb.filter((s) => s.variantId === rule.variantId);
     const unitsSold7d = variantSales
@@ -195,6 +141,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .filter((p) => p.variantId === rule.variantId)
       .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
 
+    // Dynamic stock-on-hand = initial catalog baseline + dock receipts
+    const totalReceived = receivedByVariant[rule.variantId] || 0;
+    const stockOnHand = catalog.baseStockOnHand + totalReceived;
+
     return {
       id: rule.id,
       variantId: rule.variantId,
@@ -205,7 +155,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       imageUrl: catalog.imageUrl,
       supplierId: rule.supplierId,
       supplierName: rule.supplier.name,
-      stockOnHand: catalog.stockOnHand,
+      stockOnHand,
       stockOnOrder,
       ads7d,
       ads14d,
@@ -222,9 +172,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
+  const appSettings = await (prisma as any).appSettings.findFirst({
+    where: {
+      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
+    },
+  });
+
+  const defaultLookbackWindow = appSettings?.defaultLookbackWindow ? String(appSettings.defaultLookbackWindow) : "30";
+
   return {
     items: items.length > 0 ? items : MOCK_ITEMS,
     suppliers: suppliersDb.map((s) => ({ id: s.id, name: s.name })),
+    defaultLookbackWindow: (defaultLookbackWindow === "7" || defaultLookbackWindow === "14" || defaultLookbackWindow === "90" ? defaultLookbackWindow : "30") as "7" | "14" | "30" | "90",
   };
 };
 
@@ -541,7 +500,9 @@ export default function ReplenishmentDashboard() {
   // Filters & Controls
   const [selectedSupplier, setSelectedSupplier] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [rollingWindow, setRollingWindow] = useState<"7" | "14" | "30" | "90">("30");
+  const [rollingWindow, setRollingWindow] = useState<"7" | "14" | "30" | "90">(
+    loaderData?.defaultLookbackWindow || "30",
+  );
   const [filterStatus, setFilterStatus] = useState<
     "all" | "Reorder Now" | "Overstocked" | "Incoming" | "Stock OK"
   >("all");
@@ -732,9 +693,21 @@ export default function ReplenishmentDashboard() {
     }, 1200);
   };
 
-  // Create PO action tied directly to selected rows
+  // Create PO action tied directly to selected rows with multi-supplier guard
   const handleCreatePOFromSelected = () => {
     if (selectedResources.length === 0) return;
+
+    const selectedItems = items.filter((i) => selectedResources.includes(i.id));
+    const distinctSuppliers = Array.from(new Set(selectedItems.map((i) => i.supplierName)));
+
+    if (distinctSuppliers.length > 1) {
+      shopify.toast.show(
+        `Selected items span multiple suppliers (${distinctSuppliers.join(", ")}). Please select items from a single supplier or filter by vendor.`,
+        { isError: true },
+      );
+      return;
+    }
+
     shopify.toast.show(`Creating Draft Purchase Order with ${selectedResources.length} selected items...`);
     navigate(`/app/purchase-orders/new?items=${selectedResources.join(",")}`);
   };
