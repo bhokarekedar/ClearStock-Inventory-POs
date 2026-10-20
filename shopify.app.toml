@@ -57,14 +57,6 @@ api_version = "2027-01"
   topics = [ "products/delete" ]
 
   [[webhooks.subscriptions]]
-  uri = "/webhooks/orders/create"
-  topics = [ "orders/create" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/orders/updated"
-  topics = [ "orders/updated" ]
-
-  [[webhooks.subscriptions]]
   uri = "/webhooks/inventory_levels/update"
   topics = [ "inventory_levels/update" ]
 
