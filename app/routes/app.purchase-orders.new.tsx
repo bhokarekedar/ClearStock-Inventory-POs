@@ -204,6 +204,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }>;
 
   const expectedArrival = expectedArrivalStr ? new Date(String(expectedArrivalStr)) : null;
+  const statusParam = String(formData.get("status") || "DRAFT");
+  const poStatus = statusParam === "ORDERED" ? "ORDERED" : "DRAFT";
 
   // Persist Purchase Order into PostgreSQL
   const po = await prisma.purchaseOrder.create({
@@ -211,7 +213,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       shop,
       poNumber,
       supplierId,
-      status: "DRAFT",
+      status: poStatus,
       expectedArrival,
       notes,
       items: {
@@ -280,7 +282,7 @@ export default function PurchaseOrderDraftEditor() {
     return { totalUnits, totalCost, totalCases };
   }, [items]);
 
-  const handleSaveDraft = () => {
+  const handleSaveDraft = (status: "DRAFT" | "ORDERED" = "DRAFT") => {
     if (items.length === 0) {
       shopify.toast.show("Cannot save an empty Purchase Order. Please add line items.");
       return;
@@ -301,18 +303,43 @@ export default function PurchaseOrderDraftEditor() {
         supplierId,
         expectedArrival,
         notes,
+        status,
         items: JSON.stringify(payload),
       },
       { method: "post" },
     );
   };
 
-  const handleExportPDF = () => {
-    shopify.toast.show(`Generating supplier-ready PDF for ${poNumber}...`);
-  };
-
   const handleExportCSV = () => {
-    shopify.toast.show(`Exporting ${poNumber} line items to CSV.`);
+    const rows: (string | number)[][] = [
+      ["PO Number", "Supplier", "Expected Arrival", "SKU", "Supplier SKU", "Title", "Variant", "Quantity Ordered", "Case Pack", "Unit Cost ($)", "Subtotal ($)"],
+      ...items.map((i) => [
+        poNumber,
+        supplierName,
+        expectedArrival || "TBD",
+        i.sku,
+        i.supplierSku,
+        i.title,
+        i.variantTitle,
+        i.orderQuantity,
+        i.packSize,
+        i.unitCost.toFixed(2),
+        (i.orderQuantity * i.unitCost).toFixed(2),
+      ]),
+    ];
+
+    const csvContent =
+      "data:text/csv;charset=utf-8," +
+      rows.map((e) => e.map((val) => `"${String(val).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `${poNumber}_Draft_${supplierName.replace(/\s+/g, "_")}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    shopify.toast.show(`Exported ${poNumber} to CSV.`);
   };
 
   return (
@@ -324,18 +351,18 @@ export default function PurchaseOrderDraftEditor() {
       title={`${poNumber} (Draft Purchase Order)`}
       subtitle={`Supplier: ${supplierName} • Created from replenishment recommendations`}
       primaryAction={{
-        content: isSubmitting ? "Saving to Database..." : "Save Draft PO",
+        content: isSubmitting ? "Creating & Issuing..." : "Save & Issue PO (Mark Ordered)",
         loading: isSubmitting,
-        onAction: handleSaveDraft,
+        onAction: () => handleSaveDraft("ORDERED"),
       }}
       secondaryActions={[
         {
-          content: "Export PDF",
-          icon: ExportIcon,
-          onAction: handleExportPDF,
+          content: "Save as Draft Only",
+          onAction: () => handleSaveDraft("DRAFT"),
         },
         {
-          content: "Export CSV",
+          content: "Export Supplier CSV",
+          icon: ExportIcon,
           onAction: handleExportCSV,
         },
       ]}

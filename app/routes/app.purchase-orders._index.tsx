@@ -137,100 +137,102 @@ export default function PurchaseOrdersPage() {
       }}
     >
       <BlockStack gap="400">
-        <Card padding="0">
-          <IndexTable
-            resourceName={{ singular: "purchase order", plural: "purchase orders" }}
-            itemCount={orders.length}
-            selectable={false}
-            headings={[
-              { title: "PO Number" },
-              { title: "Supplier" },
-              { title: "Status" },
-              { title: "Items / Units" },
-              { title: "Total Value" },
-              { title: "Expected Arrival" },
-              { title: "Actions", alignment: "end" },
-            ]}
-          >
-            {orders.map((po, index) => (
-              <IndexTable.Row id={po.id} key={po.id} position={index}>
-                <IndexTable.Cell>
-                  <div style={{ minWidth: "130px" }}>
-                    <Text as="span" variant="bodyMd" fontWeight="semibold">
-                      {po.poNumber}
-                    </Text>
-                  </div>
-                </IndexTable.Cell>
+        <div className="clearstock-po-table">
+          <Card padding="0">
+            <IndexTable
+              resourceName={{ singular: "purchase order", plural: "purchase orders" }}
+              itemCount={orders.length}
+              selectable={false}
+              headings={[
+                { title: "PO Number" },
+                { title: "Supplier" },
+                { title: "Status" },
+                { title: "Items / Units" },
+                { title: "Total Value" },
+                { title: "Expected Arrival" },
+                { title: "Actions", alignment: "end" },
+              ]}
+            >
+              {orders.map((po, index) => (
+                <IndexTable.Row id={po.id} key={po.id} position={index}>
+                  <IndexTable.Cell>
+                    <div style={{ minWidth: "130px" }}>
+                      <Text as="span" variant="bodyMd" fontWeight="semibold">
+                        {po.poNumber}
+                      </Text>
+                    </div>
+                  </IndexTable.Cell>
 
-                <IndexTable.Cell>
-                  <div style={{ minWidth: "170px" }}>
-                    <Text as="span" variant="bodySm">
-                      {po.supplier}
-                    </Text>
-                  </div>
-                </IndexTable.Cell>
+                  <IndexTable.Cell>
+                    <div style={{ minWidth: "170px" }}>
+                      <Text as="span" variant="bodySm">
+                        {po.supplier}
+                      </Text>
+                    </div>
+                  </IndexTable.Cell>
 
-                <IndexTable.Cell>
-                  <div style={{ minWidth: "140px" }}>
-                    <Badge tone={po.badgeTone}>{po.status}</Badge>
-                  </div>
-                </IndexTable.Cell>
+                  <IndexTable.Cell>
+                    <div style={{ minWidth: "140px" }}>
+                      <Badge tone={po.badgeTone}>{po.status}</Badge>
+                    </div>
+                  </IndexTable.Cell>
 
-                <IndexTable.Cell>
-                  <div style={{ minWidth: "160px" }}>
-                    <Text as="span" variant="bodySm">
-                      {po.itemsCount} SKUs ({po.totalUnits} units)
-                    </Text>
-                  </div>
-                </IndexTable.Cell>
+                  <IndexTable.Cell>
+                    <div style={{ minWidth: "160px" }}>
+                      <Text as="span" variant="bodySm">
+                        {po.itemsCount} SKUs ({po.totalUnits} units)
+                      </Text>
+                    </div>
+                  </IndexTable.Cell>
 
-                <IndexTable.Cell>
-                  <div style={{ minWidth: "120px" }}>
-                    <Text as="span" variant="bodySm" fontWeight="medium">
-                      ${po.totalCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </Text>
-                  </div>
-                </IndexTable.Cell>
+                  <IndexTable.Cell>
+                    <div style={{ minWidth: "120px" }}>
+                      <Text as="span" variant="bodySm" fontWeight="medium">
+                        ${po.totalCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </Text>
+                    </div>
+                  </IndexTable.Cell>
 
-                <IndexTable.Cell>
-                  <div style={{ minWidth: "140px" }}>
-                    <Text as="span" variant="bodySm" tone="subdued">
-                      {po.expectedArrival}
-                    </Text>
-                  </div>
-                </IndexTable.Cell>
+                  <IndexTable.Cell>
+                    <div style={{ minWidth: "140px" }}>
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        {po.expectedArrival}
+                      </Text>
+                    </div>
+                  </IndexTable.Cell>
 
-                <IndexTable.Cell>
-                  <div style={{ minWidth: "140px", textAlign: "right" }}>
-                    <InlineStack gap="100" align="end">
-                      {po.status === "Draft" ? (
-                        <Button size="slim" onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}>
-                          View / Edit
-                        </Button>
-                      ) : po.status === "Ordered" || po.status === "Partially Received" ? (
-                        <Button
-                          variant="primary"
-                          size="slim"
-                          onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}
-                        >
-                          Receive Stock
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="plain"
-                          size="slim"
-                          onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}
-                        >
-                          View Details
-                        </Button>
-                      )}
-                    </InlineStack>
-                  </div>
-                </IndexTable.Cell>
-              </IndexTable.Row>
-            ))}
-          </IndexTable>
-        </Card>
+                  <IndexTable.Cell>
+                    <div style={{ minWidth: "140px", textAlign: "right" }}>
+                      <InlineStack gap="100" align="end">
+                        {po.status === "Draft" ? (
+                          <Button size="slim" onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}>
+                            View / Edit
+                          </Button>
+                        ) : po.status === "Ordered" || po.status === "Partially Received" ? (
+                          <Button
+                            variant="primary"
+                            size="slim"
+                            onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}
+                          >
+                            Receive Stock
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="plain"
+                            size="slim"
+                            onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}
+                          >
+                            View Details
+                          </Button>
+                        )}
+                      </InlineStack>
+                    </div>
+                  </IndexTable.Cell>
+                </IndexTable.Row>
+              ))}
+            </IndexTable>
+          </Card>
+        </div>
       </BlockStack>
     </Page>
   );

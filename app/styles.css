@@ -109,3 +109,339 @@
 .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:nth-child(2) {
   background-color: var(--p-color-bg-surface-brand-hover, #eaf2fd) !important;
 }
+
+/* ==========================================================================
+   Pinned Right Action Column (.clearstock-sticky-table & .clearstock-po-table)
+   Pins the rightmost Actions/Audit column so it stays permanently visible
+   while all intermediate data columns flow underneath it.
+   ========================================================================== */
+
+/* Universal Pinned Last Column (Actions / Audit buttons) */
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading:last-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableCell:last-child,
+.clearstock-po-table .Polaris-IndexTable__TableHeading:last-child,
+.clearstock-po-table .Polaris-IndexTable__TableCell:last-child {
+  position: sticky !important;
+  right: 0 !important;
+  z-index: 22 !important;
+  background-color: var(--p-color-bg-surface, #ffffff) !important;
+  box-shadow: -4px 0 8px -2px rgba(0, 0, 0, 0.08) !important;
+  border-left: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
+  text-align: right !important;
+  min-width: 140px !important;
+}
+
+.clearstock-sticky-table .Polaris-IndexTable__TableHeading:last-child,
+.clearstock-po-table .Polaris-IndexTable__TableHeading:last-child {
+  z-index: 26 !important;
+  background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
+}
+
+/* Hover & Selected states for Pinned Last Column */
+.clearstock-sticky-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:last-child,
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:last-child,
+.clearstock-po-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:last-child,
+.clearstock-po-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:last-child {
+  background-color: var(--p-color-bg-surface-hover, #f1f2f3) !important;
+}
+
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:last-child,
+.clearstock-po-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:last-child {
+  background-color: var(--p-color-bg-surface-selected, #f2f7fe) !important;
+}
+
+.clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:last-child,
+.clearstock-po-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:last-child {
+  background-color: var(--p-color-bg-surface-brand-hover, #eaf2fd) !important;
+}
+
+/* ==========================================================================
+   PO Table Specific Pinned Columns (.clearstock-po-table)
+   For tables without checkboxes where Column 1 is PO Number.
+   ========================================================================== */
+.clearstock-po-table .Polaris-IndexTable__TableHeading:first-child,
+.clearstock-po-table .Polaris-IndexTable__TableCell:first-child {
+  position: sticky !important;
+  left: 0 !important;
+  z-index: 23 !important;
+  background-color: var(--p-color-bg-surface, #ffffff) !important;
+  min-width: 130px !important;
+  box-shadow: 3px 0 6px -2px rgba(0, 0, 0, 0.08) !important;
+  border-right: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
+}
+
+.clearstock-po-table .Polaris-IndexTable__TableHeading:first-child {
+  z-index: 26 !important;
+  background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
+}
+
+.clearstock-po-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:first-child,
+.clearstock-po-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:first-child {
+  background-color: var(--p-color-bg-surface-hover, #f1f2f3) !important;
+}
+
+/* ==========================================================================
+   ClearStock Premium Product / SKU Combobox Dropdown
+   ========================================================================== */
+
+/* Outer popover container */
+.clearstock-combobox-container {
+  display: flex;
+  flex-direction: column;
+  background-color: #ffffff;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #dcdfe3;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+/* Sticky top header bar inside dropdown */
+.clearstock-combobox-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: #f7f8f9;
+  border-bottom: 1px solid #e5e7eb;
+  user-select: none;
+}
+
+.clearstock-combobox-header-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #5c5f62;
+}
+
+.clearstock-combobox-header-hint {
+  font-size: 11px;
+  color: #8c9196;
+}
+
+/* Scroll area with sleek scrollbar */
+.clearstock-combobox-scroll {
+  max-height: 290px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  width: 100%;
+}
+
+.clearstock-combobox-scroll ul,
+.clearstock-combobox-scroll .Polaris-Listbox {
+  width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  list-style: none !important;
+  box-sizing: border-box !important;
+}
+
+.clearstock-combobox-scroll::-webkit-scrollbar {
+  width: 7px;
+}
+
+.clearstock-combobox-scroll::-webkit-scrollbar-track {
+  background: #f1f2f4;
+}
+
+.clearstock-combobox-scroll::-webkit-scrollbar-thumb {
+  background: #c1c5cb;
+  border-radius: 4px;
+}
+
+.clearstock-combobox-scroll::-webkit-scrollbar-thumb:hover {
+  background: #8c9196;
+}
+
+/* Full-bleed edge-to-edge divider on every product row item */
+.clearstock-combobox-scroll .Polaris-Listbox-Option,
+.clearstock-combobox-scroll [role="option"],
+.clearstock-combobox-scroll li {
+  width: 100% !important;
+  display: block !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  list-style: none !important;
+  border: none !important;
+  border-bottom: 1px solid #e1e3e5 !important;
+  box-sizing: border-box !important;
+  background: #ffffff !important;
+}
+
+.clearstock-combobox-scroll li:last-child {
+  border-bottom: none !important;
+}
+
+/* Individual Product Row (100% width, edge-to-edge hover/selected) */
+.clearstock-sku-option-row {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  padding: 12px 16px !important;
+  border-bottom: none !important;
+  cursor: pointer !important;
+  background-color: #ffffff;
+  transition: background-color 0.12s ease-in-out, border-left-color 0.12s ease-in-out;
+  border-left: 3px solid transparent;
+  gap: 12px;
+}
+
+/* Visible dimmed contrast on hover & keyboard arrow focus */
+.clearstock-combobox-scroll li:hover .clearstock-sku-option-row,
+.clearstock-combobox-scroll li:focus .clearstock-sku-option-row,
+.clearstock-combobox-scroll li[data-focused] .clearstock-sku-option-row,
+.clearstock-sku-option-row:hover {
+  background-color: #eef2f7 !important;
+  border-left-color: #008060 !important;
+}
+
+.clearstock-combobox-scroll li:hover .clearstock-sku-thumb,
+.clearstock-sku-option-row:hover .clearstock-sku-thumb {
+  background-color: #e1e6ec !important;
+  border-color: #cbd2d9 !important;
+}
+
+/* Selected row highlight with clear distinct blue tint */
+.clearstock-sku-option-row.selected {
+  background-color: #eaf2fd !important;
+  border-left-color: #2c6ecb !important;
+}
+
+.clearstock-combobox-scroll li:hover .clearstock-sku-option-row.selected,
+.clearstock-sku-option-row.selected:hover {
+  background-color: #deebfd !important;
+  border-left-color: #1a56a6 !important;
+}
+
+.clearstock-sku-option-row.linked:not(.selected):not(:hover) {
+  background-color: #fafbfc;
+}
+
+/* Left thumbnail */
+.clearstock-sku-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background-color: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.clearstock-sku-option-row.selected .clearstock-sku-thumb {
+  background-color: #e3effd;
+  border-color: #b4d3f2;
+}
+
+/* Middle text info */
+.clearstock-sku-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 3px;
+}
+
+.clearstock-sku-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #202223;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+.clearstock-sku-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #6d7175;
+}
+
+.clearstock-sku-variant {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.clearstock-sku-dot {
+  color: #9ca3af;
+  font-weight: bold;
+}
+
+.clearstock-sku-code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  background-color: #f1f2f4;
+  color: #374151;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #e5e7eb;
+}
+
+/* Right badges & price */
+.clearstock-sku-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.clearstock-sku-cost {
+  font-size: 12px;
+  font-weight: 600;
+  color: #0b5cab;
+  background-color: #f0f7fe;
+  border: 1px solid #cce4fc;
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.clearstock-sku-tag-selected {
+  font-size: 11px;
+  font-weight: 600;
+  color: #0d593c;
+  background-color: #e3f5eb;
+  border: 1px solid #a3e2c3;
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.clearstock-sku-tag-linked {
+  font-size: 11px;
+  font-weight: 600;
+  color: #5c5f62;
+  background-color: #f1f2f3;
+  border: 1px solid #e1e3e5;
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.clearstock-combobox-empty {
+  padding: 24px;
+  text-align: center;
+  color: #6d7175;
+}
+
+.clearstock-combobox-empty p {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0 0 4px 0;
+  color: #202223;
+}
+
+.clearstock-combobox-empty span.subdued {
+  font-size: 12px;
+  color: #8c9196;
+}

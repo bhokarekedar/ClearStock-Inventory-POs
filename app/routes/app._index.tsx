@@ -824,7 +824,34 @@ export default function ReplenishmentDashboard() {
           background-color: var(--p-color-bg-surface-brand-hover, #eaf2fd) !important;
         }
 
-        /* 4. Hide Polaris ghost sticky header which causes duplicate overlapping titles */
+        /* 4. Pinned Actions / Audit Column (Pinned to Right) */
+        .clearstock-sticky-table .Polaris-IndexTable__TableHeading:last-child,
+        .clearstock-sticky-table .Polaris-IndexTable__TableCell:last-child {
+          position: sticky !important;
+          right: 0 !important;
+          z-index: 22 !important;
+          background-color: var(--p-color-bg-surface, #ffffff) !important;
+          box-shadow: -4px 0 8px -2px rgba(0, 0, 0, 0.08) !important;
+          border-left: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
+          text-align: right !important;
+          min-width: 140px !important;
+        }
+        .clearstock-sticky-table .Polaris-IndexTable__TableHeading:last-child {
+          z-index: 26 !important;
+          background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
+        }
+        .clearstock-sticky-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:last-child,
+        .clearstock-sticky-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:last-child {
+          background-color: var(--p-color-bg-surface-hover, #f1f2f3) !important;
+        }
+        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:last-child {
+          background-color: var(--p-color-bg-surface-selected, #f2f7fe) !important;
+        }
+        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:last-child {
+          background-color: var(--p-color-bg-surface-brand-hover, #eaf2fd) !important;
+        }
+
+        /* 5. Hide Polaris ghost sticky header which causes duplicate overlapping titles */
         .Polaris-IndexTable__StickyTableHeader {
           display: none !important;
         }
