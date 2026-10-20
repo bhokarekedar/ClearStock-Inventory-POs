@@ -736,7 +736,7 @@ export default function ReplenishmentDashboard() {
   const handleCreatePOFromSelected = () => {
     if (selectedResources.length === 0) return;
     shopify.toast.show(`Creating Draft Purchase Order with ${selectedResources.length} selected items...`);
-    navigate("/app/purchase-orders/new");
+    navigate(`/app/purchase-orders/new?items=${selectedResources.join(",")}`);
   };
 
   // Math details for active modal

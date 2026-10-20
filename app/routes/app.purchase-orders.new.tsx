@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useNavigate, useRouteError } from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useNavigate, useRouteError, useLoaderData, useSubmit, useNavigation, redirect } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   Page,
@@ -15,6 +15,7 @@ import {
   Thumbnail,
   Divider,
   Banner,
+  Select,
 } from "@shopify/polaris";
 import {
   ArrowLeftIcon,
@@ -24,14 +25,73 @@ import {
 } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-  return null;
+// Fallback catalog details for product imagery and display
+const CATALOG_DEFAULTS: Record<
+  string,
+  {
+    title: string;
+    variantTitle: string;
+    sku: string;
+    imageUrl: string;
+  }
+> = {
+  "gid://shopify/ProductVariant/44129481923": {
+    title: "Heavyweight Boxy Hoodie",
+    variantTitle: "Vintage Black / Large",
+    sku: "HDY-BLK-L",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+  },
+  "gid://shopify/ProductVariant/44129481924": {
+    title: "Organic Cotton Ribbed Beanie",
+    variantTitle: "Olive Green / One Size",
+    sku: "BN-OLV-OS",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
+  },
+  "gid://shopify/ProductVariant/44129481925": {
+    title: "Canvas Chore Jacket",
+    variantTitle: "Caramel Tan / XL",
+    sku: "JKT-CRM-XL",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
+  },
+  "gid://shopify/ProductVariant/44129481926": {
+    title: "Thermal Waffle Crewneck",
+    variantTitle: "Heather Grey / Medium",
+    sku: "WFL-GRY-M",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
+  },
+  "gid://shopify/ProductVariant/44129481927": {
+    title: "Heavyweight Boxy Hoodie",
+    variantTitle: "Off-White / Medium",
+    sku: "HDY-WHT-M",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+  },
+  "gid://shopify/ProductVariant/44129481928": {
+    title: "French Terry Sweatpants",
+    variantTitle: "Sage Green / Small",
+    sku: "SWP-SGE-S",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
+  },
+  "gid://shopify/ProductVariant/44129481929": {
+    title: "Chunky Knit Scarf",
+    variantTitle: "Charcoal / One Size",
+    sku: "SCF-CHR-OS",
+    imageUrl:
+      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
+  },
 };
 
-interface DraftPOItem {
+export interface DraftPOItem {
   id: string;
+  variantId: string;
+  inventoryItemId: string;
   title: string;
   variantTitle: string;
   sku: string;
@@ -43,61 +103,152 @@ interface DraftPOItem {
   unitCost: number;
 }
 
-const INITIAL_PO_ITEMS: DraftPOItem[] = [
-  {
-    id: "po-item-1",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Vintage Black / Large",
-    sku: "HDY-BLK-L",
-    supplierSku: "APX-HDY-01-L",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    packSize: 24,
-    calculatedDeficit: 147,
-    orderQuantity: 168, // 7 cases of 24
-    unitCost: 18.5,
-  },
-  {
-    id: "po-item-2",
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Heather Grey / Medium",
-    sku: "WFL-GRY-M",
-    supplierSku: "APX-WFL-03-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
-    packSize: 12,
-    calculatedDeficit: 25,
-    orderQuantity: 36, // 3 cases of 12
-    unitCost: 14.0,
-  },
-  {
-    id: "po-item-3",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Vintage Black / Medium",
-    sku: "HDY-BLK-M",
-    supplierSku: "APX-HDY-01-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    packSize: 24,
-    calculatedDeficit: 40,
-    orderQuantity: 48, // 2 cases of 24
-    unitCost: 18.5,
-  },
-];
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+
+  const url = new URL(request.url);
+  const itemsParam = url.searchParams.get("items");
+  const selectedRuleIds = itemsParam ? itemsParam.split(",").filter(Boolean) : [];
+
+  // 1. Fetch all suppliers for selection
+  const suppliers = await prisma.supplier.findMany({
+    orderBy: { name: "asc" },
+  });
+
+  // 2. Determine next sequential PO number
+  const poCount = await prisma.purchaseOrder.count();
+  const nextPoNumber = `PO-${1002 + poCount}`;
+
+  // 3. Fetch rules for selected items or fallback to top rules
+  const selectedRules =
+    selectedRuleIds.length > 0
+      ? await prisma.variantSupplierRule.findMany({
+          where: { id: { in: selectedRuleIds } },
+          include: { supplier: true },
+        })
+      : [];
+
+  const rules =
+    selectedRules.length > 0
+      ? selectedRules
+      : await prisma.variantSupplierRule.findMany({
+          include: { supplier: true },
+          take: 3,
+        });
+
+  // 4. Default to primary supplier
+  const primarySupplier = rules[0]?.supplier || suppliers[0] || {
+    id: "sup-apex",
+    name: "Apex Apparel Ltd.",
+    defaultLeadTime: 14,
+  };
+
+  // 5. Pre-calculate recommended case-pack quantities
+  const draftItems: DraftPOItem[] = rules.map((r) => {
+    const catalog = CATALOG_DEFAULTS[r.variantId] || {
+      title: "Product " + (r.supplierSku || r.id),
+      variantTitle: "Default Variant",
+      sku: r.supplierSku || "SKU-" + r.id.slice(0, 6),
+      imageUrl: "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+    };
+
+    const deficit = Math.max(r.minOrderQty, 24);
+    const cases = Math.ceil(deficit / r.packSize);
+    const recommendedQty = cases * r.packSize;
+
+    return {
+      id: r.id,
+      variantId: r.variantId,
+      inventoryItemId: r.inventoryItemId || "",
+      title: catalog.title,
+      variantTitle: catalog.variantTitle,
+      sku: catalog.sku,
+      supplierSku: r.supplierSku || catalog.sku,
+      imageUrl: catalog.imageUrl,
+      packSize: r.packSize,
+      calculatedDeficit: deficit,
+      orderQuantity: recommendedQty,
+      unitCost: Number(r.unitCost),
+    };
+  });
+
+  return {
+    poNumber: nextPoNumber,
+    suppliers: suppliers.map((s) => ({ label: s.name, value: s.id })),
+    defaultSupplierId: primarySupplier.id,
+    defaultSupplierName: primarySupplier.name,
+    defaultLeadTime: primarySupplier.defaultLeadTime || 14,
+    items: draftItems,
+  };
+};
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
+
+  const formData = await request.formData();
+  const poNumber = String(formData.get("poNumber"));
+  const supplierId = String(formData.get("supplierId"));
+  const expectedArrivalStr = formData.get("expectedArrival");
+  const notes = String(formData.get("notes") || "");
+  const itemsJson = String(formData.get("items") || "[]");
+
+  const itemsData = JSON.parse(itemsJson) as Array<{
+    variantId: string;
+    inventoryItemId?: string;
+    sku?: string;
+    title: string;
+    quantityOrdered: number;
+    unitCost: number;
+  }>;
+
+  const expectedArrival = expectedArrivalStr ? new Date(String(expectedArrivalStr)) : null;
+
+  // Persist Purchase Order into PostgreSQL
+  const po = await prisma.purchaseOrder.create({
+    data: {
+      shop,
+      poNumber,
+      supplierId,
+      status: "DRAFT",
+      expectedArrival,
+      notes,
+      items: {
+        create: itemsData.map((item) => ({
+          variantId: item.variantId,
+          inventoryItemId: item.inventoryItemId || null,
+          sku: item.sku || null,
+          title: item.title,
+          quantityOrdered: Number(item.quantityOrdered),
+          unitCost: item.unitCost,
+        })),
+      },
+    },
+  });
+
+  return redirect(`/app/purchase-orders/${po.poNumber}`);
+};
 
 export default function PurchaseOrderDraftEditor() {
   const shopify = useAppBridge();
   const navigate = useNavigate();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  const loaderData = useLoaderData<typeof loader>();
 
-  const [poNumber] = useState<string>("PO-1042");
-  const [supplierName] = useState<string>("Apex Apparel Ltd.");
+  const isSubmitting = navigation.state === "submitting";
+
+  const [poNumber] = useState<string>(loaderData.poNumber);
+  const [supplierId, setSupplierId] = useState<string>(loaderData.defaultSupplierId);
+  const [supplierName, setSupplierName] = useState<string>(loaderData.defaultSupplierName);
   const [expectedArrival, setExpectedArrival] = useState<string>(
-    new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+    new Date(Date.now() + loaderData.defaultLeadTime * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
   );
   const [notes, setNotes] = useState<string>(
-    "Standard sea freight. Ship in master cartons of 24 with barcode labels on outer box.",
+    "Standard sea freight. Ship in master cartons with barcode labels on outer boxes.",
   );
-  const [items, setItems] = useState<DraftPOItem[]>(INITIAL_PO_ITEMS);
+  const [items, setItems] = useState<DraftPOItem[]>(loaderData.items);
 
   // Update item quantity
   const handleQuantityChange = (id: string, newQtyStr: string) => {
@@ -130,7 +281,30 @@ export default function PurchaseOrderDraftEditor() {
   }, [items]);
 
   const handleSaveDraft = () => {
-    shopify.toast.show(`${poNumber} saved as draft.`);
+    if (items.length === 0) {
+      shopify.toast.show("Cannot save an empty Purchase Order. Please add line items.");
+      return;
+    }
+
+    const payload = items.map((i) => ({
+      variantId: i.variantId,
+      inventoryItemId: i.inventoryItemId,
+      sku: i.sku,
+      title: i.title,
+      quantityOrdered: i.orderQuantity,
+      unitCost: i.unitCost,
+    }));
+
+    submit(
+      {
+        poNumber,
+        supplierId,
+        expectedArrival,
+        notes,
+        items: JSON.stringify(payload),
+      },
+      { method: "post" },
+    );
   };
 
   const handleExportPDF = () => {
@@ -150,7 +324,8 @@ export default function PurchaseOrderDraftEditor() {
       title={`${poNumber} (Draft Purchase Order)`}
       subtitle={`Supplier: ${supplierName} • Created from replenishment recommendations`}
       primaryAction={{
-        content: "Save Draft PO",
+        content: isSubmitting ? "Saving to Database..." : "Save Draft PO",
+        loading: isSubmitting,
         onAction: handleSaveDraft,
       }}
       secondaryActions={[
@@ -169,7 +344,7 @@ export default function PurchaseOrderDraftEditor() {
         <Banner tone="info">
           <Text as="p" variant="bodyMd">
             Quantities are pre-filled based on your replenishment deficit and supplier pack sizes.
-            You can manually override any quantity directly in the table below.
+            You can manually override any quantity directly in the table below before saving to PostgreSQL.
           </Text>
         </Banner>
 
@@ -180,73 +355,76 @@ export default function PurchaseOrderDraftEditor() {
               <BlockStack gap="300">
                 <InlineStack align="space-between" blockAlign="center">
                   <Text as="h2" variant="headingMd">
-                    Purchase Order Line Items ({items.length})
+                    Order Line Items ({items.length})
                   </Text>
-                  <Badge tone="attention">Draft - Not Yet Sent</Badge>
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    Rounded to Case Pack Multiples
+                  </Text>
                 </InlineStack>
 
-                <Divider />
-
-                {/* Items List / Spreadsheet Row */}
-                <BlockStack gap="300">
+                <BlockStack gap="200">
                   {items.map((item) => {
-                    const cases = Math.ceil(item.orderQuantity / item.packSize);
-                    const isMultiple = item.orderQuantity % item.packSize === 0;
-                    const lineTotal = item.orderQuantity * item.unitCost;
+                    const lineCases = Math.ceil(item.orderQuantity / item.packSize);
+                    const lineSubtotal = item.orderQuantity * item.unitCost;
+                    const isCasePackAligned = item.orderQuantity % item.packSize === 0;
 
                     return (
-                      <Card key={item.id} background="bg-surface-secondary" padding="300">
-                        <InlineStack align="space-between" blockAlign="center" gap="300">
+                      <Card key={item.id} padding="300" background="bg-surface-secondary">
+                        <InlineStack align="space-between" blockAlign="center" gap="400">
                           {/* Product Info */}
                           <InlineStack gap="300" blockAlign="center">
-                            <Thumbnail source={item.imageUrl} alt={item.title} size="small" />
+                            <Thumbnail
+                              source={item.imageUrl}
+                              alt={item.title}
+                              size="medium"
+                            />
                             <BlockStack gap="050">
-                              <Text as="span" variant="bodyMd" fontWeight="semibold">
+                              <Text as="p" variant="bodyMd" fontWeight="bold">
                                 {item.title}
                               </Text>
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                {item.variantTitle} • SKU: {item.sku} (Supplier SKU: {item.supplierSku})
+                              <Text as="p" variant="bodySm" tone="subdued">
+                                {item.variantTitle} • SKU: {item.sku}
                               </Text>
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                Pack Size: {item.packSize} units/case • Deficit: {item.calculatedDeficit} units
-                              </Text>
+                              <InlineStack gap="150" blockAlign="center">
+                                <Badge tone="info">{`Pack of ${item.packSize}`}</Badge>
+                                <Text as="span" variant="bodyXs" tone="subdued">
+                                  Vendor SKU: {item.supplierSku}
+                                </Text>
+                              </InlineStack>
                             </BlockStack>
                           </InlineStack>
 
-                          {/* Editable Quantity & Cost Controls */}
+                          {/* Editable Quantity & Cost Inputs */}
                           <InlineStack gap="300" blockAlign="center">
-                            <div style={{ width: "120px" }}>
+                            <BlockStack gap="050" inlineAlign="end">
+                              <Text as="span" variant="bodyXs" tone="subdued">
+                                Unit Cost
+                              </Text>
+                              <Text as="span" variant="bodyMd" fontWeight="semibold">
+                                ${item.unitCost.toFixed(2)}
+                              </Text>
+                            </BlockStack>
+
+                            <div style={{ width: "100px" }}>
                               <TextField
                                 label="Order Qty"
+                                labelHidden
                                 type="number"
-                                value={item.orderQuantity.toString()}
+                                value={String(item.orderQuantity)}
                                 onChange={(val) => handleQuantityChange(item.id, val)}
                                 autoComplete="off"
-                                helpText={
-                                  isMultiple
-                                    ? `${cases} cases (${item.packSize}/cs)`
-                                    : `⚠️ Not a multiple of ${item.packSize}`
-                                }
+                                autoSize
                               />
                             </div>
 
-                            <div style={{ width: "90px", textAlign: "right" }}>
-                              <Text as="p" variant="bodyXs" tone="subdued">
-                                Unit Cost
+                            <BlockStack gap="050" inlineAlign="end">
+                              <Text as="span" variant="bodyXs" tone="subdued">
+                                {lineCases} cases
                               </Text>
-                              <Text as="p" variant="bodyMd" fontWeight="medium">
-                                ${item.unitCost.toFixed(2)}
+                              <Text as="span" variant="bodyMd" fontWeight="bold">
+                                ${lineSubtotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </Text>
-                            </div>
-
-                            <div style={{ width: "110px", textAlign: "right" }}>
-                              <Text as="p" variant="bodyXs" tone="subdued">
-                                Line Total
-                              </Text>
-                              <Text as="p" variant="bodyMd" fontWeight="bold">
-                                ${lineTotal.toFixed(2)}
-                              </Text>
-                            </div>
+                            </BlockStack>
 
                             <Button
                               icon={DeleteIcon}
@@ -330,13 +508,24 @@ export default function PurchaseOrderDraftEditor() {
                     Logistics & Timeline
                   </Text>
 
+                  <Select
+                    label="Supplier"
+                    options={loaderData.suppliers}
+                    value={supplierId}
+                    onChange={(val) => {
+                      setSupplierId(val);
+                      const s = loaderData.suppliers.find((sup) => sup.value === val);
+                      if (s) setSupplierName(s.label);
+                    }}
+                  />
+
                   <TextField
                     label="Expected Delivery Date"
                     type="date"
                     value={expectedArrival}
                     onChange={setExpectedArrival}
                     autoComplete="off"
-                    helpText="Default 14-day lead time applied"
+                    helpText={`Lead time: ${loaderData.defaultLeadTime} days`}
                   />
 
                   <TextField
@@ -363,4 +552,3 @@ export function ErrorBoundary() {
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
-

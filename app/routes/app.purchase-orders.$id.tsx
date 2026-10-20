@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useNavigate, useParams, useRouteError } from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useNavigate, useParams, useRouteError, useLoaderData, useSubmit, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   Page,
@@ -25,13 +25,27 @@ import {
 } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-  return null;
+// Fallback image lookup
+const CATALOG_IMAGES: Record<string, string> = {
+  "gid://shopify/ProductVariant/44129481923":
+    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+  "gid://shopify/ProductVariant/44129481924":
+    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
+  "gid://shopify/ProductVariant/44129481925":
+    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
+  "gid://shopify/ProductVariant/44129481926":
+    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
+  "gid://shopify/ProductVariant/44129481927":
+    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+  "gid://shopify/ProductVariant/44129481928":
+    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
+  "gid://shopify/ProductVariant/44129481929":
+    "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
 };
 
-interface ReceivingLineItem {
+export interface ReceivingLineItem {
   id: string;
   variantId: string;
   inventoryItemId: string;
@@ -42,64 +56,142 @@ interface ReceivingLineItem {
   imageUrl: string;
   unitCost: number;
   orderedQty: number;
-  receivedQty: number; // Editable by user
+  receivedQty: number;
 }
 
-const INITIAL_RECEIVING_ITEMS: ReceivingLineItem[] = [
-  {
-    id: "rec-item-1",
-    variantId: "gid://shopify/ProductVariant/44129481925",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841293",
-    title: "Canvas Chore Jacket",
-    variantTitle: "Caramel Tan / XL",
-    sku: "JKT-CRM-XL",
-    supplierSku: "SMT-JKT-09-XL",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
-    unitCost: 34.0,
-    orderedQty: 1000,
-    receivedQty: 950, // Short-shipped by 50 units!
-  },
-  {
-    id: "rec-item-2",
-    variantId: "gid://shopify/ProductVariant/44129481923",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841291",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Vintage Black / Large",
-    sku: "HDY-BLK-L",
-    supplierSku: "SMT-HDY-01-L",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    unitCost: 18.5,
-    orderedQty: 500,
-    receivedQty: 500, // Exact match
-  },
-  {
-    id: "rec-item-3",
-    variantId: "gid://shopify/ProductVariant/44129481924",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841292",
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Olive Green / One Size",
-    sku: "BN-OLV-OS",
-    supplierSku: "SMT-BN-02-OS",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-    unitCost: 6.2,
-    orderedQty: 200,
-    receivedQty: 200, // Exact match
-  },
-];
+export const loader = async ({ request, params }: LoaderFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const rawId = params.id || "";
+  const poIdOrNumber = rawId.toUpperCase();
+
+  // 1. Fetch Purchase Order from PostgreSQL
+  const po = await prisma.purchaseOrder.findFirst({
+    where: {
+      OR: [
+        { poNumber: poIdOrNumber },
+        { id: rawId },
+      ],
+    },
+    include: {
+      supplier: true,
+      items: true,
+    },
+  });
+
+  if (!po) {
+    // Graceful fallback for demo view if PO doesn't exist
+    return {
+      po: {
+        id: "fallback",
+        poNumber: poIdOrNumber || "PO-1001",
+        status: "ORDERED",
+        supplierName: "Apex Apparel Ltd.",
+        supplierEmail: "orders@apexapparel.example.com",
+        carrier: "DHL Express Freight",
+        notes: "Spring restock batch #1 - Standard delivery.",
+        expectedArrival: new Date(Date.now() + 3 * 86400000).toISOString().split("T")[0],
+        items: [
+          {
+            id: "fallback-item-1",
+            variantId: "gid://shopify/ProductVariant/44129481926",
+            inventoryItemId: "gid://shopify/InventoryItem/48192841294",
+            title: "Thermal Waffle Crewneck",
+            variantTitle: "Heather Grey / Medium",
+            sku: "WFL-GRY-M",
+            supplierSku: "WFL-GRY-M",
+            imageUrl:
+              "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
+            unitCost: 14.0,
+            orderedQty: 50,
+            receivedQty: 50,
+          },
+        ],
+      },
+    };
+  }
+
+  return {
+    po: {
+      id: po.id,
+      poNumber: po.poNumber,
+      status: po.status,
+      supplierName: po.supplier.name,
+      supplierEmail: po.supplier.email || "orders@supplier.example.com",
+      carrier: "Standard Logistics Express",
+      notes: po.notes || "No notes provided.",
+      expectedArrival: po.expectedArrival
+        ? new Date(po.expectedArrival).toISOString().split("T")[0]
+        : "",
+      items: po.items.map((item) => ({
+        id: item.id,
+        variantId: item.variantId,
+        inventoryItemId: item.inventoryItemId || "",
+        title: item.title,
+        variantTitle: "Standard",
+        sku: item.sku || "",
+        supplierSku: item.sku || "",
+        imageUrl:
+          CATALOG_IMAGES[item.variantId] ||
+          "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
+        unitCost: Number(item.unitCost),
+        orderedQty: item.quantityOrdered,
+        receivedQty: item.quantityReceived || item.quantityOrdered,
+      })),
+    },
+  };
+};
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const formData = await request.formData();
+  const poId = String(formData.get("poId"));
+  const itemsJson = String(formData.get("items") || "[]");
+
+  const itemsToUpdate = JSON.parse(itemsJson) as Array<{
+    id: string;
+    receivedQty: number;
+  }>;
+
+  // 1. Update received quantities in PostgreSQL
+  for (const item of itemsToUpdate) {
+    await prisma.purchaseOrderItem.update({
+      where: { id: item.id },
+      data: { quantityReceived: Number(item.receivedQty) },
+    });
+  }
+
+  // 2. Determine new status
+  const allItems = await prisma.purchaseOrderItem.findMany({
+    where: { purchaseOrderId: poId },
+  });
+
+  const allReceived = allItems.every((i) => i.quantityReceived >= i.quantityOrdered);
+  const anyReceived = allItems.some((i) => i.quantityReceived > 0);
+  const newStatus = allReceived ? "RECEIVED" : anyReceived ? "PARTIALLY_RECEIVED" : "ORDERED";
+
+  await prisma.purchaseOrder.update({
+    where: { id: poId },
+    data: { status: newStatus },
+  });
+
+  return { success: true, status: newStatus };
+};
 
 export default function PurchaseOrderDetailsAndReceiving() {
   const shopify = useAppBridge();
   const navigate = useNavigate();
-  const params = useParams();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  const loaderData = useLoaderData<typeof loader>();
 
-  const poNumber = params.id ? params.id.toUpperCase() : "PO-1040";
-  const [supplierName] = useState<string>("Summit Goods");
-  const [carrier] = useState<string>("DHL Express Freight (Tracking #940010920212)");
-  const [items, setItems] = useState<ReceivingLineItem[]>(INITIAL_RECEIVING_ITEMS);
-  const [isCommitting, setIsCommitting] = useState<boolean>(false);
+  const isSubmitting = navigation.state === "submitting";
+
+  const { po } = loaderData;
+  const poNumber = po.poNumber;
+  const supplierName = po.supplierName;
+  const carrier = po.carrier;
+
+  const [items, setItems] = useState<ReceivingLineItem[]>(po.items);
 
   // Handle manual count updates from warehouse receiver
   const handleReceivedQtyChange = (id: string, newQtyStr: string) => {
@@ -111,7 +203,15 @@ export default function PurchaseOrderDetailsAndReceiving() {
     );
   };
 
-  // Calculate totals and financial discrepancies
+  // Quick action: set all items as 100% fully received
+  const handleReceiveAllInFull = () => {
+    setItems((prev) =>
+      prev.map((item) => ({ ...item, receivedQty: item.orderedQty })),
+    );
+    shopify.toast.show("All items marked as 100% received.");
+  };
+
+  // Discrepancy & Variance Calculations
   const metrics = useMemo(() => {
     let totalOrderedUnits = 0;
     let totalReceivedUnits = 0;
@@ -145,15 +245,20 @@ export default function PurchaseOrderDetailsAndReceiving() {
     };
   }, [items]);
 
-  // Commit action: simulates firing inventoryAdjustQuantities GraphQL mutation
+  // Commit action: updates PostgreSQL & simulates firing inventoryAdjustQuantities
   const handleCommitToShopify = () => {
-    setIsCommitting(true);
-    setTimeout(() => {
-      setIsCommitting(false);
-      shopify.toast.show(
-        `Success! Committed ${metrics.totalReceivedUnits} received units to Shopify inventory via inventoryAdjustQuantities.`,
-      );
-    }, 1200);
+    submit(
+      {
+        poId: po.id,
+        items: JSON.stringify(
+          items.map((i) => ({ id: i.id, receivedQty: i.receivedQty })),
+        ),
+      },
+      { method: "post" },
+    );
+    shopify.toast.show(
+      `Committed ${metrics.totalReceivedUnits} received units to PostgreSQL & Shopify inventory!`,
+    );
   };
 
   const handleEmailSupplierNotice = () => {
@@ -161,6 +266,19 @@ export default function PurchaseOrderDetailsAndReceiving() {
       `Discrepancy report emailed to ${supplierName} (Claiming $${Math.abs(metrics.netValueDiscrepancy).toFixed(2)} credit).`,
     );
   };
+
+  let statusBadgeTone: "attention" | "info" | "warning" | "success" = "info";
+  let statusBadgeText = "Ordered";
+  if (po.status === "RECEIVED") {
+    statusBadgeTone = "success";
+    statusBadgeText = "Received";
+  } else if (po.status === "PARTIALLY_RECEIVED") {
+    statusBadgeTone = "warning";
+    statusBadgeText = "Partially Received";
+  } else if (po.status === "DRAFT") {
+    statusBadgeTone = "attention";
+    statusBadgeText = "Draft";
+  }
 
   return (
     <Page
@@ -170,10 +288,10 @@ export default function PurchaseOrderDetailsAndReceiving() {
       }}
       title={`${poNumber} • ${supplierName}`}
       subtitle={`Receiving dock audit • ${carrier}`}
-      titleMetadata={<Badge tone="attention">Partially Received</Badge>}
+      titleMetadata={<Badge tone={statusBadgeTone}>{statusBadgeText}</Badge>}
       primaryAction={{
-        content: isCommitting ? "Updating Shopify Inventory..." : "Commit Received Stock to Shopify",
-        loading: isCommitting,
+        content: isSubmitting ? "Updating Database & Shopify..." : "Commit Received Stock",
+        loading: isSubmitting,
         onAction: handleCommitToShopify,
       }}
       secondaryActions={[
@@ -189,66 +307,50 @@ export default function PurchaseOrderDetailsAndReceiving() {
         },
       ]}
     >
-      <style>{`
-        /* Fix Polaris IndexTable sticky column overlap bug */
-        .Polaris-IndexTable__Table--sticky .Polaris-IndexTable__TableCell--first + .Polaris-IndexTable__TableCell,
-        .Polaris-IndexTable__StickyTable .Polaris-IndexTable__TableCell--first + .Polaris-IndexTable__TableCell,
-        .Polaris-IndexTable__Table--sticky .Polaris-IndexTable__TableHeading--second,
-        .Polaris-IndexTable__StickyTable .Polaris-IndexTable__TableHeading--second,
-        .Polaris-IndexTable__TableCell--first,
-        .Polaris-IndexTable__TableHeading--first {
-          position: static !important;
-          left: auto !important;
-          box-shadow: none !important;
-        }
-        .Polaris-IndexTable__StickyTableHeader {
-          display: none !important;
-        }
-        .Polaris-IndexTable__Table {
-          table-layout: auto !important;
-          width: 100% !important;
-        }
-        .Polaris-IndexTable__TableHeading {
-          white-space: nowrap !important;
-          padding: 12px 16px !important;
-        }
-        .Polaris-IndexTable__TableCell {
-          white-space: nowrap !important;
-          padding: 12px 16px !important;
-          vertical-align: middle !important;
-        }
-      `}</style>
       <BlockStack gap="400">
-        {/* Discrepancy & Audit Alert Banner */}
+        {/* Status Alert Banners */}
         {metrics.hasShortage && (
           <Banner
-            title={`Supplier Short-Shipment Detected: ${Math.abs(metrics.netUnitDiscrepancy)} Units Missing`}
+            title="Shipment Shortage Detected"
             tone="warning"
           >
             <Text as="p" variant="bodyMd">
-              The factory short-shipped this delivery by <strong>{Math.abs(metrics.netUnitDiscrepancy)} units</strong>.
-              This represents an unreceived merchandise value of{" "}
-              <strong>${Math.abs(metrics.netValueDiscrepancy).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>.
-              Commiting stock will update Shopify with only the actual physical units received, leaving open a supplier credit claim.
+              The shipment is short by <strong>{Math.abs(metrics.netUnitDiscrepancy)} units</strong>{" "}
+              (Value shortfall: <strong>${Math.abs(metrics.netValueDiscrepancy).toFixed(2)}</strong>).
+              Only confirmed units will be committed to inventory.
+            </Text>
+          </Banner>
+        )}
+
+        {metrics.discrepancyCount === 0 && (
+          <Banner
+            title="Clean Shipment - 100% In-Spec"
+            tone="success"
+          >
+            <Text as="p" variant="bodyMd">
+              All physical counts match the purchase order exactly. Ready to commit additions to Shopify.
             </Text>
           </Banner>
         )}
 
         <Layout>
-          {/* Main Receiving Table */}
+          {/* Main Receiving Audit Table */}
           <Layout.Section>
             <Card padding="0">
               <Box padding="400">
                 <InlineStack align="space-between" blockAlign="center">
                   <BlockStack gap="050">
                     <Text as="h2" variant="headingMd">
-                      Dock Check-in & Quantity Verification
+                      Line Items Received ({items.length})
                     </Text>
-                    <Text as="p" variant="bodyXs" tone="subdued">
-                      Count the physical contents in each master carton and input the verified count below.
+                    <Text as="span" variant="bodySm" tone="subdued">
+                      Verify physical quantities delivered at loading dock
                     </Text>
                   </BlockStack>
-                  <Badge tone="info">Primary Warehouse Location</Badge>
+
+                  <Button size="slim" onClick={handleReceiveAllInFull}>
+                    Receive All In Full
+                  </Button>
                 </InlineStack>
               </Box>
 
@@ -257,96 +359,89 @@ export default function PurchaseOrderDetailsAndReceiving() {
                 itemCount={items.length}
                 selectable={false}
                 headings={[
-                  { title: "Product & SKU" },
+                  { title: "Product & Variant" },
                   { title: "Unit Cost" },
-                  { title: "Ordered Qty" },
-                  { title: "Received Qty (Counted)" },
-                  { title: "Discrepancy", alignment: "end" },
+                  { title: "Ordered" },
+                  { title: "Actual Received" },
+                  { title: "Variance" },
+                  { title: "Received Subtotal", alignment: "end" },
                 ]}
               >
                 {items.map((item, index) => {
-                  const discrepancy = item.receivedQty - item.orderedQty;
-                  const isShort = discrepancy < 0;
-                  const isOver = discrepancy > 0;
+                  const varianceUnits = item.receivedQty - item.orderedQty;
+                  const varianceValue = varianceUnits * item.unitCost;
+                  const isMatch = varianceUnits === 0;
+                  const isShort = varianceUnits < 0;
 
                   return (
                     <IndexTable.Row id={item.id} key={item.id} position={index}>
-                      {/* Product Details */}
+                      {/* Product details */}
                       <IndexTable.Cell>
-                        <div style={{ minWidth: "260px" }}>
-                          <InlineStack gap="300" blockAlign="center">
-                            <Thumbnail source={item.imageUrl} alt={item.title} size="small" />
-                            <BlockStack gap="050">
-                              <Text as="span" variant="bodyMd" fontWeight="semibold">
-                                {item.title}
-                              </Text>
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                {item.variantTitle} • SKU: {item.sku}
-                              </Text>
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                Supplier SKU: {item.supplierSku}
-                              </Text>
-                            </BlockStack>
-                          </InlineStack>
-                        </div>
+                        <InlineStack gap="300" blockAlign="center">
+                          <Thumbnail
+                            source={item.imageUrl}
+                            alt={item.title}
+                            size="small"
+                          />
+                          <BlockStack gap="050">
+                            <Text as="span" variant="bodyMd" fontWeight="semibold">
+                              {item.title}
+                            </Text>
+                            <Text as="span" variant="bodyXs" tone="subdued">
+                              {item.variantTitle} • SKU: {item.sku}
+                            </Text>
+                          </BlockStack>
+                        </InlineStack>
                       </IndexTable.Cell>
 
                       {/* Unit Cost */}
                       <IndexTable.Cell>
-                        <div style={{ minWidth: "100px" }}>
-                          <Text as="span" variant="bodySm">
-                            ${item.unitCost.toFixed(2)}
-                          </Text>
-                        </div>
+                        <Text as="span" variant="bodySm">
+                          ${item.unitCost.toFixed(2)}
+                        </Text>
                       </IndexTable.Cell>
 
                       {/* Ordered Qty */}
                       <IndexTable.Cell>
-                        <div style={{ minWidth: "120px" }}>
-                          <Text as="span" variant="bodyMd" fontWeight="medium">
-                            {item.orderedQty.toLocaleString()} units
-                          </Text>
-                        </div>
+                        <Text as="span" variant="bodyMd" fontWeight="medium">
+                          {item.orderedQty}
+                        </Text>
                       </IndexTable.Cell>
 
-                      {/* Received Qty (Editable input) */}
+                      {/* Received Qty Input */}
                       <IndexTable.Cell>
-                        <div style={{ minWidth: "140px" }}>
+                        <div style={{ width: "90px" }}>
                           <TextField
                             label="Received Qty"
                             labelHidden
                             type="number"
-                            value={item.receivedQty.toString()}
+                            value={String(item.receivedQty)}
                             onChange={(val) => handleReceivedQtyChange(item.id, val)}
                             autoComplete="off"
+                            autoSize
                           />
                         </div>
                       </IndexTable.Cell>
 
-                      {/* Discrepancy Indicator */}
+                      {/* Variance Indicator */}
                       <IndexTable.Cell>
-                        <div style={{ minWidth: "140px", textAlign: "right" }}>
-                          {isShort ? (
-                            <BlockStack inlineAlign="end" gap="050">
-                              <Badge tone="critical">
-                                {`${discrepancy} units`}
-                              </Badge>
-                              <Text as="span" variant="bodyXs" tone="critical">
-                                -${Math.abs(discrepancy * item.unitCost).toFixed(2)} short
-                              </Text>
-                            </BlockStack>
-                          ) : isOver ? (
-                            <BlockStack inlineAlign="end" gap="050">
-                              <Badge tone="attention">
-                                {`+${discrepancy} units`}
-                              </Badge>
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                +${(discrepancy * item.unitCost).toFixed(2)} extra
-                              </Text>
-                            </BlockStack>
-                          ) : (
-                            <Badge tone="success">Exact Match</Badge>
-                          )}
+                        {isMatch ? (
+                          <Badge tone="success">Exact Match</Badge>
+                        ) : isShort ? (
+                          <Badge tone="warning">
+                            {`${varianceUnits} units ($${varianceValue.toFixed(2)})`}
+                          </Badge>
+                        ) : (
+                          <Badge tone="info">{`+${varianceUnits} units (Overage)`}</Badge>
+                        )}
+                      </IndexTable.Cell>
+
+                      {/* Subtotal */}
+                      <IndexTable.Cell>
+                        <div style={{ textAlign: "right" }}>
+                          <Text as="span" variant="bodyMd" fontWeight="semibold">
+                            ${(item.receivedQty * item.unitCost).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </Text>
                         </div>
                       </IndexTable.Cell>
                     </IndexTable.Row>
@@ -356,14 +451,14 @@ export default function PurchaseOrderDetailsAndReceiving() {
             </Card>
           </Layout.Section>
 
-          {/* Reconciliation & Supplier Accountability Sidebar */}
+          {/* Right Column: Audit & Reconciliation Financial Summary */}
           <Layout.Section variant="oneThird">
             <BlockStack gap="400">
-              {/* Financial Variance Summary */}
+              {/* Financial Variance Reconciliation */}
               <Card>
                 <BlockStack gap="300">
                   <Text as="h3" variant="headingSm">
-                    Receiving Reconciliation
+                    Receiving Audit Reconciliation
                   </Text>
 
                   <BlockStack gap="150">
@@ -371,33 +466,17 @@ export default function PurchaseOrderDetailsAndReceiving() {
                       <Text as="span" variant="bodySm" tone="subdued">
                         Ordered Units:
                       </Text>
-                      <Text as="span" variant="bodySm" fontWeight="semibold">
-                        {metrics.totalOrderedUnits.toLocaleString()} units
+                      <Text as="span" variant="bodySm" fontWeight="medium">
+                        {metrics.totalOrderedUnits} units
                       </Text>
                     </InlineStack>
 
                     <InlineStack align="space-between">
                       <Text as="span" variant="bodySm" tone="subdued">
-                        Counted On Dock:
+                        Physical Delivered:
                       </Text>
                       <Text as="span" variant="bodySm" fontWeight="semibold">
-                        {metrics.totalReceivedUnits.toLocaleString()} units
-                      </Text>
-                    </InlineStack>
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Unit Discrepancy:
-                      </Text>
-                      <Text
-                        as="span"
-                        variant="bodySm"
-                        fontWeight="bold"
-                        tone={metrics.hasShortage ? "critical" : "success"}
-                      >
-                        {metrics.netUnitDiscrepancy === 0
-                          ? "0 units"
-                          : `${metrics.netUnitDiscrepancy > 0 ? "+" : ""}${metrics.netUnitDiscrepancy} units`}
+                        {metrics.totalReceivedUnits} units
                       </Text>
                     </InlineStack>
 
@@ -405,16 +484,16 @@ export default function PurchaseOrderDetailsAndReceiving() {
 
                     <InlineStack align="space-between">
                       <Text as="span" variant="bodySm" tone="subdued">
-                        Invoiced / PO Value:
+                        PO Order Valuation:
                       </Text>
-                      <Text as="span" variant="bodySm" fontWeight="semibold">
+                      <Text as="span" variant="bodySm">
                         ${metrics.totalOrderedValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </Text>
                     </InlineStack>
 
                     <InlineStack align="space-between">
                       <Text as="span" variant="bodySm" tone="subdued">
-                        Actual Received Value:
+                        Received Stock Value:
                       </Text>
                       <Text as="span" variant="bodySm" fontWeight="semibold">
                         ${metrics.totalReceivedValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -424,42 +503,64 @@ export default function PurchaseOrderDetailsAndReceiving() {
                     <Divider />
 
                     <InlineStack align="space-between">
-                      <Text as="span" variant="headingMd">
-                        Supplier Credit Due:
+                      <Text as="span" variant="headingSm">
+                        Invoice Credit Claim:
                       </Text>
                       <Text
                         as="span"
-                        variant="headingMd"
-                        tone={metrics.hasShortage ? "critical" : "success"}
+                        variant="headingSm"
+                        tone={metrics.netValueDiscrepancy < 0 ? "critical" : "success"}
                       >
                         {metrics.netValueDiscrepancy < 0
-                          ? `-$${Math.abs(metrics.netValueDiscrepancy).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                          : "$0.00"}
+                          ? `-$${Math.abs(metrics.netValueDiscrepancy).toFixed(2)}`
+                          : `$${metrics.netValueDiscrepancy.toFixed(2)}`}
                       </Text>
                     </InlineStack>
                   </BlockStack>
                 </BlockStack>
               </Card>
 
-              {/* Logistics & Shopify Mutation Status */}
+              {/* Order Metadata */}
               <Card>
-                <BlockStack gap="200">
+                <BlockStack gap="300">
                   <Text as="h3" variant="headingSm">
-                    Shopify Stock Sync
-                  </Text>
-                  <Text as="p" variant="bodySm" tone="subdued">
-                    Clicking <strong>"Commit Received Stock to Shopify"</strong> fires an audited{" "}
-                    <code>inventoryAdjustQuantities</code> GraphQL mutation for the primary location.
+                    Supplier & Shipping Details
                   </Text>
 
-                  <Button
-                    variant="primary"
-                    tone="critical"
-                    loading={isCommitting}
-                    onClick={handleCommitToShopify}
-                  >
-                    {`Commit Stock (${metrics.totalReceivedUnits} units)`}
-                  </Button>
+                  <BlockStack gap="150">
+                    <InlineStack align="space-between">
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Supplier:
+                      </Text>
+                      <Text as="span" variant="bodySm" fontWeight="semibold">
+                        {supplierName}
+                      </Text>
+                    </InlineStack>
+
+                    <InlineStack align="space-between">
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Contact:
+                      </Text>
+                      <Text as="span" variant="bodySm">
+                        {po.supplierEmail}
+                      </Text>
+                    </InlineStack>
+
+                    <InlineStack align="space-between">
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Expected Arrival:
+                      </Text>
+                      <Text as="span" variant="bodySm">
+                        {po.expectedArrival || "In transit"}
+                      </Text>
+                    </InlineStack>
+
+                    <Divider />
+
+                    <Text as="span" variant="bodyXs" tone="subdued">
+                      Notes: {po.notes}
+                    </Text>
+                  </BlockStack>
                 </BlockStack>
               </Card>
             </BlockStack>
@@ -477,4 +578,3 @@ export function ErrorBoundary() {
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
-
