@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useNavigate, useRouteError, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -14,6 +14,7 @@ import {
   TextField,
   Select,
   Button,
+  ButtonGroup,
   BlockStack,
   InlineStack,
   Text,
@@ -546,6 +547,25 @@ export default function ReplenishmentDashboard() {
     });
   }, [calculatedRows, selectedSupplier, filterStatus, searchQuery]);
 
+  // Pagination State
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(25);
+
+  // Auto-reset to first page when search, supplier, status tab, or page size changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedSupplier, filterStatus, searchQuery, pageSize]);
+
+  const totalItems = filteredRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const startIndex = totalItems > 0 ? (safeCurrentPage - 1) * pageSize : 0;
+  const endIndex = Math.min(startIndex + pageSize, totalItems);
+
+  const paginatedRows = useMemo(() => {
+    return filteredRows.slice(startIndex, endIndex);
+  }, [filteredRows, startIndex, endIndex]);
+
   // Index table selection via Polaris useIndexResourceState
   const resourceIDResolver = (item: (typeof filteredRows)[0]) => item.id;
   const { selectedResources, allResourcesSelected, handleSelectionChange } =
@@ -680,8 +700,10 @@ export default function ReplenishmentDashboard() {
 
   const handleClearAll = () => {
     setSelectedSupplier("all");
-    setRollingWindow("30");
+    setRollingWindow(loaderData?.defaultLookbackWindow || "30");
     setSearchQuery("");
+    setFilterStatus("all");
+    setCurrentPage(1);
   };
 
   // Self-Service Heal Action
@@ -836,12 +858,12 @@ export default function ReplenishmentDashboard() {
         }
         .Polaris-IndexTable__TableHeading {
           white-space: nowrap !important;
-          padding: 12px 16px !important;
+          padding: 8px 12px !important;
           text-overflow: clip !important;
         }
         .Polaris-IndexTable__TableCell {
           white-space: nowrap !important;
-          padding: 12px 16px !important;
+          padding: 8px 12px !important;
           vertical-align: middle !important;
         }
         .Polaris-IndexTable__TableRow {
@@ -946,7 +968,7 @@ export default function ReplenishmentDashboard() {
           </Card>
         </InlineGrid>
 
-        {/* Data Table with Integrated Native Polaris IndexFilters */}
+        {/* Data Table with Integrated Native Polaris IndexFilters & Visible Toolbar */}
         <Card padding="0">
           <IndexFilters
             sortOptions={[]}
@@ -958,108 +980,196 @@ export default function ReplenishmentDashboard() {
             tabs={tabs}
             selected={selectedTab}
             onSelect={(index) => setFilterStatus(tabStatuses[index])}
-            filters={filters}
-            appliedFilters={appliedFilters}
+            filters={[]}
+            appliedFilters={[]}
             mode={mode}
             setMode={setMode}
             canCreateNewView={false}
           />
 
+          {/* Always-visible Multi-filter Toolbar */}
+          <Box padding="300" borderBlockStartWidth="025" borderColor="border-secondary" background="bg-surface-secondary">
+            <InlineStack align="space-between" blockAlign="center" gap="400" wrap>
+              <InlineStack gap="400" blockAlign="center" wrap>
+                {/* 1. Supplier Filter */}
+                <div style={{ minWidth: "220px" }}>
+                  <Select
+                    label="Supplier"
+                    labelInline
+                    options={supplierOptions}
+                    value={selectedSupplier}
+                    onChange={(val) => setSelectedSupplier(val)}
+                  />
+                </div>
+
+                {/* 2. Sales Lookback Window Segmented Buttons */}
+                <InlineStack gap="200" blockAlign="center">
+                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
+                    Sales Window:
+                  </Text>
+                  <ButtonGroup variant="segmented">
+                    <Button
+                      size="slim"
+                      pressed={rollingWindow === "7"}
+                      onClick={() => setRollingWindow("7")}
+                    >
+                      7D
+                    </Button>
+                    <Button
+                      size="slim"
+                      pressed={rollingWindow === "14"}
+                      onClick={() => setRollingWindow("14")}
+                    >
+                      14D
+                    </Button>
+                    <Button
+                      size="slim"
+                      pressed={rollingWindow === "30"}
+                      onClick={() => setRollingWindow("30")}
+                    >
+                      30D
+                    </Button>
+                    <Button
+                      size="slim"
+                      pressed={rollingWindow === "90"}
+                      onClick={() => setRollingWindow("90")}
+                    >
+                      90D
+                    </Button>
+                  </ButtonGroup>
+                </InlineStack>
+              </InlineStack>
+
+              <InlineStack gap="300" blockAlign="center" wrap>
+                {/* Page Size Selector */}
+                <InlineStack gap="150" blockAlign="center">
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    Rows:
+                  </Text>
+                  <div style={{ width: "115px" }}>
+                    <Select
+                      label="Rows per page"
+                      labelHidden
+                      options={[
+                        { label: "25 / page", value: "25" },
+                        { label: "50 / page", value: "50" },
+                        { label: "100 / page", value: "100" },
+                      ]}
+                      value={String(pageSize)}
+                      onChange={(val) => setPageSize(parseInt(val, 10))}
+                    />
+                  </div>
+                </InlineStack>
+
+                {/* Reset Action if any filter is active */}
+                {(selectedSupplier !== "all" || rollingWindow !== (loaderData?.defaultLookbackWindow || "30") || searchQuery.trim() !== "") && (
+                  <Button
+                    variant="plain"
+                    tone="critical"
+                    size="slim"
+                    onClick={handleClearAll}
+                  >
+                    Reset All Filters
+                  </Button>
+                )}
+              </InlineStack>
+            </InlineStack>
+          </Box>
+
           <div className="clearstock-sticky-table">
             <IndexTable
-            resourceName={{
-              singular: "inventory item",
-              plural: "inventory items",
-            }}
-            itemCount={filteredRows.length}
-            selectedItemsCount={
-              allResourcesSelected ? "All" : selectedResources.length
-            }
-            onSelectionChange={handleSelectionChange}
-            headings={[
-              { title: "Product & SKU" },
-              { title: "Status" },
-              { title: "Supplier" },
-              { title: "Stock & Runway" },
-              { title: "Daily Sales (Avg)" },
-              { title: "Recommended Order", alignment: "end" },
-            ]}
-          >
-            {filteredRows.map((row, index) => {
-              const { calc } = row;
-              const isSelected = selectedResources.includes(row.id);
+              resourceName={{
+                singular: "inventory item",
+                plural: "inventory items",
+              }}
+              itemCount={filteredRows.length}
+              selectedItemsCount={
+                allResourcesSelected ? "All" : selectedResources.length
+              }
+              onSelectionChange={handleSelectionChange}
+              pagination={{
+                hasNext: safeCurrentPage < totalPages,
+                hasPrevious: safeCurrentPage > 1,
+                onNext: () => setCurrentPage((p) => Math.min(p + 1, totalPages)),
+                onPrevious: () => setCurrentPage((p) => Math.max(p - 1, 1)),
+                label: totalItems > 0 ? `${startIndex + 1}–${endIndex} of ${totalItems} items` : "0 items",
+              }}
+              headings={[
+                { title: "Product & SKU" },
+                { title: "Status" },
+                { title: "Supplier" },
+                { title: "Stock & Runway" },
+                { title: "Daily Sales (Avg)" },
+                { title: "Recommended Order", alignment: "end" },
+              ]}
+            >
+              {paginatedRows.map((row, index) => {
+                const { calc } = row;
+                const isSelected = selectedResources.includes(row.id);
 
-              return (
-                <IndexTable.Row
-                  id={row.id}
-                  key={row.id}
-                  selected={isSelected}
-                  position={index}
-                >
-                  {/* Product Details */}
+                return (
+                  <IndexTable.Row
+                    id={row.id}
+                    key={row.id}
+                    selected={isSelected}
+                    position={startIndex + index}
+                  >
+                  {/* Product Details (Compact 2 lines) */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "220px" }}>
-                      <InlineStack gap="300" blockAlign="center" wrap={false}>
+                    <div style={{ minWidth: "210px" }}>
+                      <InlineStack gap="200" blockAlign="center" wrap={false}>
                         <Thumbnail
                           source={row.imageUrl}
                           alt={row.title}
                           size="small"
                         />
-                        <BlockStack gap="050">
-                          <Text as="span" variant="bodyMd" fontWeight="semibold">
+                        <BlockStack gap="025">
+                          <Text as="span" variant="bodySm" fontWeight="semibold">
                             {row.title}
                           </Text>
-                          <InlineStack gap="150" blockAlign="center">
-                            <Text as="span" variant="bodyXs" tone="subdued">
-                              {row.variantTitle}
-                            </Text>
-                            <Text as="span" variant="bodyXs" tone="subdued">
-                              •
-                            </Text>
-                            <Text as="span" variant="bodyXs" fontWeight="medium">
-                              {row.sku}
-                            </Text>
-                          </InlineStack>
+                          <Text as="span" variant="bodyXs" tone="subdued">
+                            {row.sku} · {row.variantTitle}
+                          </Text>
                         </BlockStack>
                       </InlineStack>
                     </div>
                   </IndexTable.Cell>
 
-                  {/* Status Column (Critical, Warning, Info, Success) */}
+                  {/* Status Column */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "110px" }}>
-                      <Badge tone={calc.statusTone}>{calc.statusLabel}</Badge>
+                    <div style={{ minWidth: "100px" }}>
+                      <Badge tone={calc.statusTone} size="small">{calc.statusLabel}</Badge>
                     </div>
                   </IndexTable.Cell>
 
                   {/* Supplier */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "130px" }}>
-                      <Text as="span" variant="bodySm">
+                    <div style={{ minWidth: "120px" }}>
+                      <Text as="span" variant="bodySm" tone="subdued">
                         {row.supplierName}
                       </Text>
                     </div>
                   </IndexTable.Cell>
 
-                  {/* Stock & Runway (Stacked vertically: Stock, Runway badge, and Incoming) */}
+                  {/* Stock & Runway (Clean 2 lines: Stock & Badge on Line 1, Incoming on Line 2) */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "120px" }}>
-                      <BlockStack gap="100">
-                        <Text
-                          as="span"
-                          variant="bodyMd"
-                          fontWeight={calc.statusLabel === "Reorder Now" ? "bold" : "medium"}
-                          tone={
-                            calc.statusLabel === "Reorder Now"
-                              ? "critical"
-                              : calc.statusLabel === "Overstocked"
-                              ? "caution"
-                              : "base"
-                          }
-                        >
-                          {row.stockOnHand}
-                        </Text>
-                        <div>
+                    <div style={{ minWidth: "130px" }}>
+                      <BlockStack gap="050">
+                        <InlineStack gap="150" blockAlign="center">
+                          <Text
+                            as="span"
+                            variant="bodySm"
+                            fontWeight="bold"
+                            tone={
+                              calc.statusLabel === "Reorder Now"
+                                ? "critical"
+                                : calc.statusLabel === "Overstocked"
+                                ? "caution"
+                                : "base"
+                            }
+                          >
+                            {row.stockOnHand}
+                          </Text>
                           {calc.daysOfCoverageOnHand <= 7 ? (
                             <Badge tone="critical" size="small">
                               {`${calc.daysOfCoverageOnHand}d left`}
@@ -1070,20 +1180,23 @@ export default function ReplenishmentDashboard() {
                             </Badge>
                           ) : calc.isOverstocked ? (
                             <Badge tone="warning" size="small">
-                              {`${calc.daysOfCoverageOnHand > 365 ? "365+d" : calc.daysOfCoverageOnHand + "d"} runway`}
+                              {`${calc.daysOfCoverageOnHand > 365 ? "365+d" : calc.daysOfCoverageOnHand + "d"}`}
                             </Badge>
                           ) : (
                             <Badge tone="success" size="small">
                               {`${calc.daysOfCoverageOnHand > 60 ? "60+d" : calc.daysOfCoverageOnHand + "d"}`}
                             </Badge>
                           )}
-                        </div>
-                        {row.stockOnOrder > 0 && (
-                          <div>
-                            <Badge tone="info" size="small">
-                              {`+${row.stockOnOrder} incoming`}
-                            </Badge>
-                          </div>
+                        </InlineStack>
+
+                        {row.stockOnOrder > 0 ? (
+                          <Text as="span" variant="bodyXs" tone="subdued">
+                            ↳ +{row.stockOnOrder} incoming
+                          </Text>
+                        ) : (
+                          <Text as="span" variant="bodyXs" tone="subdued">
+                            0 incoming
+                          </Text>
                         )}
                       </BlockStack>
                     </div>
@@ -1091,43 +1204,43 @@ export default function ReplenishmentDashboard() {
 
                   {/* Daily Sales (Avg) */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "110px" }}>
-                      <Text as="span" variant="bodySm">
-                        {`${calc.ads.toFixed(1)} /day`}
-                      </Text>
+                    <div style={{ minWidth: "100px" }}>
+                      <BlockStack gap="025">
+                        <Text as="span" variant="bodySm" fontWeight="medium">
+                          {`${calc.ads.toFixed(1)} /day`}
+                        </Text>
+                        <Text as="span" variant="bodyXs" tone="subdued">
+                          {`${rollingWindow}d avg`}
+                        </Text>
+                      </BlockStack>
                     </div>
                   </IndexTable.Cell>
 
-                  {/* Recommended Order & View Math Button */}
+                  {/* Recommended Order & View Math Link */}
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "170px", textAlign: "right" }}>
-                      {calc.recommendedUnits > 0 ? (
-                        <Button
-                          variant="secondary"
-                          tone="critical"
-                          size="slim"
-                          onClick={() => setActiveMathItem(row)}
-                        >
-                          {`${calc.recommendedUnits} units (View Math)`}
-                        </Button>
-                      ) : calc.isOverstocked ? (
-                        <Button
-                          variant="plain"
-                          tone="critical"
-                          size="slim"
-                          onClick={() => setActiveMathItem(row)}
-                        >
-                          {"0 units (Overstocked ⓘ)"}
-                        </Button>
-                      ) : (
+                    <div style={{ minWidth: "140px", textAlign: "right" }}>
+                      <BlockStack gap="025" inlineAlign="end">
+                        {calc.recommendedUnits > 0 ? (
+                          <Text as="span" variant="bodySm" fontWeight="bold" tone="critical">
+                            {`${calc.recommendedUnits.toLocaleString()} units`}
+                          </Text>
+                        ) : calc.isOverstocked ? (
+                          <Text as="span" variant="bodySm" fontWeight="medium" tone="caution">
+                            0 units (Overstock)
+                          </Text>
+                        ) : (
+                          <Text as="span" variant="bodySm" tone="subdued">
+                            0 units
+                          </Text>
+                        )}
                         <Button
                           variant="plain"
-                          size="slim"
+                          size="micro"
                           onClick={() => setActiveMathItem(row)}
                         >
-                          {"0 units (View Math)"}
+                          View math ⓘ
                         </Button>
-                      )}
+                      </BlockStack>
                     </div>
                   </IndexTable.Cell>
                 </IndexTable.Row>

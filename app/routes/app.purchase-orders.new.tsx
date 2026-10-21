@@ -6,6 +6,7 @@ import {
   Page,
   Layout,
   Card,
+  IndexTable,
   BlockStack,
   InlineStack,
   Text,
@@ -491,8 +492,8 @@ export default function PurchaseOrderDraftEditor() {
         <Layout>
           {/* Main PO Items Spreadsheet Table */}
           <Layout.Section>
-            <Card padding="400">
-              <BlockStack gap="300">
+            <Card padding="0">
+              <Box padding="400">
                 <InlineStack align="space-between" blockAlign="center">
                   <InlineStack gap="200" blockAlign="center">
                     <Text as="h2" variant="headingMd">
@@ -508,103 +509,126 @@ export default function PurchaseOrderDraftEditor() {
                     Add Product
                   </Button>
                 </InlineStack>
+              </Box>
 
-                <Divider />
+              <IndexTable
+                resourceName={{ singular: "line item", plural: "line items" }}
+                itemCount={items.length}
+                selectable={false}
+                headings={[
+                  { title: "Product & SKU" },
+                  { title: "Unit Cost" },
+                  { title: "Order Qty" },
+                  { title: "Cases & Total", alignment: "end" },
+                  { title: "", alignment: "end" },
+                ]}
+              >
+                {items.map((item, index) => {
+                  const lineCases = Math.ceil(item.orderQuantity / item.packSize);
+                  const lineSubtotal = item.orderQuantity * item.unitCost;
 
-                <BlockStack gap="200">
-                  {items.map((item) => {
-                    const lineCases = Math.ceil(item.orderQuantity / item.packSize);
-                    const lineSubtotal = item.orderQuantity * item.unitCost;
-
-                    return (
-                      <Card key={item.id} padding="300" background="bg-surface-secondary">
-                        <InlineStack align="space-between" blockAlign="center" gap="400">
-                          {/* Product Info */}
-                          <InlineStack gap="300" blockAlign="center">
+                  return (
+                    <IndexTable.Row id={item.id} key={item.id} position={index}>
+                      {/* Product Details */}
+                      <IndexTable.Cell>
+                        <div style={{ minWidth: "220px" }}>
+                          <InlineStack gap="200" blockAlign="center" wrap={false}>
                             <Thumbnail
                               source={item.imageUrl}
                               alt={item.title}
-                              size="medium"
+                              size="small"
                             />
-                            <BlockStack gap="050">
-                              <Text as="p" variant="bodyMd" fontWeight="bold">
+                            <BlockStack gap="025">
+                              <Text as="span" variant="bodySm" fontWeight="semibold">
                                 {item.title}
                               </Text>
-                              <Text as="p" variant="bodySm" tone="subdued">
-                                {item.variantTitle} • SKU: {item.sku}
+                              <Text as="span" variant="bodyXs" tone="subdued">
+                                {item.variantTitle} · SKU: {item.sku}
                               </Text>
-                              <InlineStack gap="150" blockAlign="center">
-                                <Badge tone="info">{`Pack of ${item.packSize}`}</Badge>
-                                <Text as="span" variant="bodyXs" tone="subdued">
-                                  Vendor SKU: {item.supplierSku}
-                                </Text>
+                              <InlineStack gap="100" blockAlign="center">
+                                <Badge tone="info" size="small">{`Pack of ${item.packSize}`}</Badge>
+                                {item.supplierSku && (
+                                  <Text as="span" variant="bodyXs" tone="subdued">
+                                    Vendor: {item.supplierSku}
+                                  </Text>
+                                )}
                               </InlineStack>
                             </BlockStack>
                           </InlineStack>
+                        </div>
+                      </IndexTable.Cell>
 
-                          {/* Editable Quantity & Cost Inputs */}
-                          <InlineStack gap="300" blockAlign="center">
-                            <BlockStack gap="050" inlineAlign="end">
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                Unit Cost
-                              </Text>
-                              <Text as="span" variant="bodyMd" fontWeight="semibold">
-                                ${item.unitCost.toFixed(2)}
-                              </Text>
-                            </BlockStack>
+                      {/* Unit Cost */}
+                      <IndexTable.Cell>
+                        <div style={{ minWidth: "80px" }}>
+                          <Text as="span" variant="bodySm" fontWeight="medium">
+                            ${item.unitCost.toFixed(2)}
+                          </Text>
+                        </div>
+                      </IndexTable.Cell>
 
-                            <div style={{ width: "100px" }}>
-                              <TextField
-                                label="Order Qty"
-                                labelHidden
-                                type="number"
-                                value={String(item.orderQuantity)}
-                                onChange={(val) => handleQuantityChange(item.id, val)}
-                                autoComplete="off"
-                                autoSize
-                              />
-                            </div>
+                      {/* Order Quantity Input */}
+                      <IndexTable.Cell>
+                        <div style={{ width: "95px" }}>
+                          <TextField
+                            label="Order Qty"
+                            labelHidden
+                            type="number"
+                            value={String(item.orderQuantity)}
+                            onChange={(val) => handleQuantityChange(item.id, val)}
+                            autoComplete="off"
+                            autoSize
+                          />
+                        </div>
+                      </IndexTable.Cell>
 
-                            <BlockStack gap="050" inlineAlign="end">
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                {lineCases} cases
-                              </Text>
-                              <Text as="span" variant="bodyMd" fontWeight="bold">
-                                ${lineSubtotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                              </Text>
-                            </BlockStack>
+                      {/* Cases & Line Total */}
+                      <IndexTable.Cell>
+                        <div style={{ minWidth: "110px", textAlign: "right" }}>
+                          <BlockStack gap="025" inlineAlign="end">
+                            <Text as="span" variant="bodySm" fontWeight="bold">
+                              ${lineSubtotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </Text>
+                            <Text as="span" variant="bodyXs" tone="subdued">
+                              {lineCases} {lineCases === 1 ? "case" : "cases"}
+                            </Text>
+                          </BlockStack>
+                        </div>
+                      </IndexTable.Cell>
 
-                            <Button
-                              icon={DeleteIcon}
-                              tone="critical"
-                              variant="plain"
-                              accessibilityLabel="Remove item"
-                              onClick={() => handleRemoveItem(item.id)}
-                            />
-                          </InlineStack>
-                        </InlineStack>
-                      </Card>
-                    );
-                  })}
+                      {/* Remove Line Action */}
+                      <IndexTable.Cell>
+                        <div style={{ textAlign: "right" }}>
+                          <Button
+                            icon={DeleteIcon}
+                            tone="critical"
+                            variant="plain"
+                            accessibilityLabel="Remove item"
+                            onClick={() => handleRemoveItem(item.id)}
+                          />
+                        </div>
+                      </IndexTable.Cell>
+                    </IndexTable.Row>
+                  );
+                })}
+              </IndexTable>
 
-                  {items.length === 0 && (
-                    <Box padding="600">
-                      <BlockStack align="center" inlineAlign="center" gap="300">
-                        <Text as="p" tone="subdued" alignment="center">
-                          No line items on this Purchase Order.
-                        </Text>
-                        <Button
-                          icon={PlusIcon}
-                          variant="primary"
-                          onClick={() => setIsAddModalOpen(true)}
-                        >
-                          Add Products from {supplierName}
-                        </Button>
-                      </BlockStack>
-                    </Box>
-                  )}
-                </BlockStack>
-              </BlockStack>
+              {items.length === 0 && (
+                <Box padding="600">
+                  <BlockStack align="center" inlineAlign="center" gap="300">
+                    <Text as="p" tone="subdued" alignment="center">
+                      No line items on this Purchase Order.
+                    </Text>
+                    <Button
+                      icon={PlusIcon}
+                      variant="primary"
+                      onClick={() => setIsAddModalOpen(true)}
+                    >
+                      Add Products from {supplierName}
+                    </Button>
+                  </BlockStack>
+                </Box>
+              )}
             </Card>
           </Layout.Section>
 
