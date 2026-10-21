@@ -210,6 +210,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               locationId: primaryLocationId,
               delta,
             });
+
+            // Immediately update local DB so replenishment dashboard reflects new stock instantly
+            if (prevItem.variantId) {
+              await prisma.variantSupplierRule.updateMany({
+                where: {
+                  shop: session.shop,
+                  variantId: prevItem.variantId,
+                },
+                data: {
+                  availableStock: {
+                    increment: delta,
+                  },
+                },
+              });
+            }
           }
         }
 

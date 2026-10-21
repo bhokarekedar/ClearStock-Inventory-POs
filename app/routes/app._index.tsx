@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useNavigate, useRouteError, useLoaderData } from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useNavigate, useRouteError, useLoaderData, useSubmit, useActionData, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   Page,
@@ -39,6 +39,77 @@ import {
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { session, admin } = await authenticate.admin(request);
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  if (intent === "HEAL_DATA") {
+    try {
+      const response = await admin.graphql(`
+        query SyncAllInventory {
+          productVariants(first: 50) {
+            edges {
+              node {
+                id
+                sku
+                title
+                inventoryItem {
+                  id
+                  inventoryLevels(first: 20) {
+                    nodes {
+                      location {
+                        isActive
+                      }
+                      quantities(names: ["available"]) {
+                        quantity
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `);
+
+      const json = await response.json();
+      const variants = json.data?.productVariants?.edges || [];
+
+      for (const edge of variants) {
+        const v = edge.node;
+        const totalAvailable = (v.inventoryItem?.inventoryLevels?.nodes || []).reduce(
+          (sum: number, lvl: any) => {
+            if (lvl.location?.isActive) {
+              const avail = lvl.quantities?.find((q: any) => q.name === "available")?.quantity || 0;
+              return sum + avail;
+            }
+            return sum;
+          },
+          0,
+        );
+
+        await prisma.variantSupplierRule.updateMany({
+          where: {
+            shop: session.shop,
+            variantId: v.id,
+          },
+          data: {
+            availableStock: totalAvailable,
+          },
+        });
+      }
+
+      return { ok: true, syncedCount: variants.length };
+    } catch (err: any) {
+      console.error("[Heal Data Error]", err);
+      return { ok: false, error: err.message };
+    }
+  }
+
+  return { ok: false };
+};
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -280,6 +351,9 @@ export function computeReplenishmentMath(
 export default function ReplenishmentDashboard() {
   const shopify = useAppBridge();
   const navigate = useNavigate();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  const actionData = useActionData<typeof action>();
   const loaderData = useLoaderData<typeof loader>();
 
   const items = loaderData?.items || [];
@@ -294,7 +368,15 @@ export default function ReplenishmentDashboard() {
   const [filterStatus, setFilterStatus] = useState<
     "all" | "Reorder Now" | "Overstocked" | "Incoming" | "Stock OK"
   >("all");
-  const [isHealing, setIsHealing] = useState<boolean>(false);
+  const isHealing = navigation.state === "submitting" && navigation.formData?.get("intent") === "HEAL_DATA";
+
+  useEffect(() => {
+    if (actionData?.ok) {
+      shopify.toast.show(`Data healed: Re-synced ${actionData.syncedCount} variants across all locations.`);
+    } else if (actionData?.error) {
+      shopify.toast.show(`Heal failed: ${actionData.error}`, { isError: true });
+    }
+  }, [actionData, shopify]);
 
   // Modal State
   const [activeMathItem, setActiveMathItem] = useState<ReplenishmentItem | null>(null);
@@ -489,11 +571,7 @@ export default function ReplenishmentDashboard() {
 
   // Self-Service Heal Action
   const handleHealData = () => {
-    setIsHealing(true);
-    setTimeout(() => {
-      setIsHealing(false);
-      shopify.toast.show("Data healed: Verified last 14 days of paid orders.");
-    }, 1200);
+    submit({ intent: "HEAL_DATA" }, { method: "post" });
   };
 
   // Create PO action tied directly to selected rows with multi-supplier guard
