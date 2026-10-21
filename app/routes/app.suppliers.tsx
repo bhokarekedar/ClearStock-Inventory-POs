@@ -47,6 +47,7 @@ export interface SupplierItem {
 export interface RuleItem {
   id: string;
   variantId: string;
+  productId: string;
   supplierId: string;
   supplierName: string;
   title: string;
@@ -101,6 +102,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return {
       id: r.id,
       variantId: r.variantId,
+      productId: r.productId || "",
       supplierId: r.supplierId,
       supplierName: r.supplier.name,
       title: r.title || "Untitled Product",
@@ -185,12 +187,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // ASSIGN or REASSIGN SKU to a Supplier
   if (intent === "ASSIGN_SKU") {
     const variantId = String(formData.get("variantId"));
+    const productId = String(formData.get("productId") || "");
     const supplierId = String(formData.get("supplierId"));
+    const applyToAllVariants = formData.get("applyToAllVariants") === "true";
     const unitCost = Math.max(0, parseFloat(String(formData.get("unitCost") || "0")));
     const packSize = Math.max(1, parseInt(String(formData.get("packSize") || "1"), 10));
     const minOrderQty = Math.max(1, parseInt(String(formData.get("minOrderQty") || "1"), 10));
     const leadTimeStr = formData.get("leadTimeDays");
     const leadTimeDays = leadTimeStr ? parseInt(String(leadTimeStr), 10) : null;
+    const syncVendor = formData.get("syncToShopifyVendor") === "true";
+    const syncCost = formData.get("syncToShopifyCost") === "true";
 
     const existingRule = await prisma.variantSupplierRule.findUnique({
       where: {
@@ -202,54 +208,102 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
 
     if (existingRule) {
-      await prisma.variantSupplierRule.update({
-        where: { id: existingRule.id },
+      // Find all target variants (either all variants of the product or just this single variant)
+      const targetProductId = productId || existingRule.productId;
+      const targetRules = applyToAllVariants && targetProductId
+        ? await prisma.variantSupplierRule.findMany({
+            where: { shop, productId: targetProductId },
+          })
+        : [existingRule];
+
+      const targetRuleIds = targetRules.map((r) => r.id);
+
+      // 1. Update rules in ClearStock PostgreSQL
+      await prisma.variantSupplierRule.updateMany({
+        where: { id: { in: targetRuleIds } },
         data: {
           supplierId,
           unitCost,
           packSize,
           minOrderQty,
-          leadTimeDays,
+          ...(leadTimeDays !== null ? { leadTimeDays } : {}),
         },
       });
 
-      // Optional Two-Way Live Sync to Shopify
-      const syncVendor = formData.get("syncToShopifyVendor") === "true";
-      if (syncVendor && existingRule.productId?.startsWith("gid://shopify/Product/")) {
+      const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
+
+      // 2. Optional Two-Way Live Sync of Vendor to Shopify (Product Level)
+      if (syncVendor && sup && targetProductId?.startsWith("gid://shopify/Product/")) {
         try {
-          const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
-          if (sup) {
-            await admin.graphql(
-              `#graphql
-              mutation updateProductVendor($input: ProductInput!) {
-                productUpdate(input: $input) {
-                  product {
-                    id
-                    vendor
-                  }
-                  userErrors {
-                    field
-                    message
-                  }
+          await admin.graphql(
+            `#graphql
+            mutation updateProductVendor($input: ProductInput!) {
+              productUpdate(input: $input) {
+                product {
+                  id
+                  vendor
                 }
-              }`,
-              {
-                variables: {
-                  input: {
-                    id: existingRule.productId,
-                    vendor: sup.name,
-                  },
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }`,
+            {
+              variables: {
+                input: {
+                  id: targetProductId,
+                  vendor: sup.name,
                 },
               },
-            );
-          }
+            },
+          );
         } catch (e) {
-          console.log("Two-way Shopify vendor sync skipped:", e);
+          console.warn("Two-way Shopify vendor sync skipped:", e);
         }
       }
+
+      // 3. Optional Two-Way Live Sync of Unit Cost to Shopify COGS (Variant Level)
+      if (syncCost && unitCost > 0) {
+        for (const rule of targetRules) {
+          if (rule.inventoryItemId?.startsWith("gid://shopify/InventoryItem/")) {
+            try {
+              await admin.graphql(
+                `#graphql
+                mutation updateInventoryCost($id: ID!, $input: InventoryItemInput!) {
+                  inventoryItemUpdate(id: $id, input: $input) {
+                    userErrors {
+                      field
+                      message
+                    }
+                  }
+                }`,
+                {
+                  variables: {
+                    id: rule.inventoryItemId,
+                    input: {
+                      cost: unitCost,
+                    },
+                  },
+                },
+              );
+            } catch (e) {
+              console.warn("Two-way Shopify COGS sync skipped:", e);
+            }
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        action: "sku_assigned",
+        count: targetRules.length,
+        productTitle: existingRule.title,
+        variantId,
+      };
     }
 
-    return { ok: true, action: "sku_assigned", variantId };
+    return { ok: false, error: "Rule not found for this variant." };
   }
 
   // Manual Live Store Catalog Ingestion from Shopify
@@ -362,10 +416,17 @@ export default function SuppliersPage() {
   const [assignMoq, setAssignMoq] = useState(String(rules[0]?.minOrderQty ?? "1"));
   const [syncToShopifyVendor, setSyncToShopifyVendor] = useState(true);
   const [syncToShopifyCost, setSyncToShopifyCost] = useState(true);
+  const [applyToAllVariants, setApplyToAllVariants] = useState(true);
 
   const selectedCatalogItem = useMemo(() => {
     return rules.find((c) => c.variantId === selectedVariantId) || rules[0] || null;
   }, [selectedVariantId, rules]);
+
+  // Find all sibling variants of the same product
+  const siblingVariants = useMemo(() => {
+    if (!selectedCatalogItem?.productId) return [];
+    return rules.filter((r) => r.productId === selectedCatalogItem.productId);
+  }, [selectedCatalogItem, rules]);
 
   // Filter variants: if input matches the selected item label or is empty, show full catalog; otherwise filter by keywords
   const filteredVariants = useMemo(() => {
@@ -411,7 +472,11 @@ export default function SuppliersPage() {
         shopify.toast.show("Supplier details updated.");
         setModalOpen(false);
       } else if (actionData.action === "sku_assigned") {
-        shopify.toast.show("SKU successfully assigned to supplier!");
+        const count = (actionData as any).count || 1;
+        const msg = count > 1
+          ? `All ${count} variants of "${(actionData as any).productTitle || "product"}" assigned to supplier!`
+          : "SKU successfully assigned to supplier!";
+        shopify.toast.show(msg);
       }
     } else if (actionData?.error) {
       setFormError(actionData.error);
@@ -493,6 +558,8 @@ export default function SuppliersPage() {
         intent: "ASSIGN_SKU",
         supplierId: activeSupplierForSkus.id,
         variantId: selectedVariantId,
+        productId: selectedCatalogItem?.productId || "",
+        applyToAllVariants: String(applyToAllVariants),
         unitCost: assignCost || "0",
         packSize: assignPackSize || "1",
         minOrderQty: assignMoq || "1",
@@ -1061,8 +1128,26 @@ export default function SuppliersPage() {
 
                   <Divider />
 
+                  {siblingVariants.length > 1 && (
+                    <Banner tone="info">
+                      <Text as="p" variant="bodySm">
+                        <strong>Product Sourcing:</strong> This product has{" "}
+                        <strong>{siblingVariants.length} variants</strong> (
+                        {siblingVariants.map((v) => v.variantTitle).join(", ")}).
+                      </Text>
+                    </Banner>
+                  )}
+
                   <InlineStack align="space-between" blockAlign="center" gap="400">
-                    <BlockStack gap="150">
+                    <BlockStack gap="200">
+                      {siblingVariants.length > 1 && (
+                        <Checkbox
+                          label={`Apply supplier to all ${siblingVariants.length} variants of "${selectedCatalogItem?.title}" (Recommended)`}
+                          checked={applyToAllVariants}
+                          onChange={setApplyToAllVariants}
+                          helpText="Ensures all sizes share the same vendor in Shopify so they can be reordered together on the same Purchase Order."
+                        />
+                      )}
                       <Checkbox
                         label={`Update Shopify Product Vendor to "${activeSupplierForSkus?.name}"`}
                         checked={syncToShopifyVendor}
