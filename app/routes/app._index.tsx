@@ -595,8 +595,8 @@ export default function ReplenishmentDashboard() {
       return;
     }
 
-    shopify.toast.show(`Creating Draft Purchase Order with ${selectedResources.length} selected items...`);
-    navigate(`/app/purchase-orders/new?items=${selectedResources.join(",")}`);
+    shopify.toast.show(`Creating Draft Purchase Order with ${selectedResources.length} selected items (${rollingWindow}D velocity)...`);
+    navigate(`/app/purchase-orders/new?items=${selectedResources.join(",")}&window=${rollingWindow}`);
   };
 
   // Math details for active modal

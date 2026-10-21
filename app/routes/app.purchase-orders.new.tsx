@@ -73,6 +73,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const itemsParam = url.searchParams.get("items");
   const supplierParam = url.searchParams.get("supplierId");
+  const windowParam = url.searchParams.get("window");
+  const lookbackDays = windowParam === "7" ? 7 : windowParam === "14" ? 14 : windowParam === "90" ? 90 : 30;
   const selectedRuleIds = itemsParam ? itemsParam.split(",").filter(Boolean) : [];
 
   // 1. Fetch all suppliers for selection
@@ -88,15 +90,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     orderBy: { variantId: "asc" },
   });
 
-  // 2.5 Fetch 30-day sales, open incoming POs, and dock receipts for true mathematical replenishment
+  // 2.5 Fetch sales for selected lookback window (7d, 14d, 30d, 90d), open incoming POs, and dock receipts
   const now = new Date();
-  const date30dAgo = new Date(now);
-  date30dAgo.setDate(date30dAgo.getDate() - 30);
+  const dateWindowAgo = new Date(now);
+  dateWindowAgo.setDate(dateWindowAgo.getDate() - lookbackDays);
 
   const salesDb = await prisma.dailySalesAggregator.findMany({
     where: {
       shop,
-      date: { gte: date30dAgo },
+      date: { gte: dateWindowAgo },
     },
   });
 
@@ -113,8 +115,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   function getRuleRecommendedQty(r: (typeof allRulesDb)[0]): { recommendedQty: number; deficit: number } {
     const variantSales = salesDb.filter((s) => s.variantId === r.variantId);
-    const unitsSold30d = variantSales.reduce((sum: number, s) => sum + s.unitsSold, 0);
-    const ads = Number((unitsSold30d / 30).toFixed(1));
+    const unitsSold = variantSales.reduce((sum: number, s) => sum + s.unitsSold, 0);
+    const ads = Number((unitsSold / lookbackDays).toFixed(1));
     const leadTime = r.leadTimeDays ?? r.supplier.defaultLeadTime;
     const leadTimeDemand = ads * leadTime;
     const safetyStock = Math.max(Math.round(ads * r.safetyStockDays), r.safetyStockMinimum);
@@ -219,6 +221,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     defaultSupplierId: primarySupplier.id,
     defaultSupplierName: primarySupplier.name,
     defaultLeadTime: primarySupplier.defaultLeadTime || 14,
+    lookbackDays,
     items: draftItems,
     availableRules,
     skippedCrossSupplierCount: selectedRules.length - initialRules.length,
@@ -542,7 +545,7 @@ export default function PurchaseOrderDraftEditor() {
 
         <Banner tone="info">
           <Text as="p" variant="bodyMd">
-            Quantities are pre-filled based on replenishment deficits and case-pack multiples. You can override quantities, add products, or remove line items before saving.
+            Quantities are pre-filled based on replenishment deficits and case-pack multiples calculated from your <strong>{loaderData.lookbackDays}D sales velocity</strong>. You can override quantities, add products, or remove line items before saving.
           </Text>
         </Banner>
 

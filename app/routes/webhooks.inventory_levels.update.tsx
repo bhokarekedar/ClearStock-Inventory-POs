@@ -64,6 +64,42 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     if (totalAvailable !== null) {
+      // Fetch existing rule to detect stock decrements (customer orders / sales)
+      const existingRules = await prisma.variantSupplierRule.findMany({
+        where: { shop, inventoryItemId },
+      });
+
+      for (const rule of existingRules) {
+        const previousStock = rule.availableStock;
+        const unitsSoldDelta = previousStock - totalAvailable;
+
+        // If inventory decreased, automatically aggregate as sales velocity for today
+        if (unitsSoldDelta > 0) {
+          const today = new Date();
+          today.setUTCHours(0, 0, 0, 0);
+
+          await prisma.dailySalesAggregator.upsert({
+            where: {
+              shop_variantId_date: {
+                shop,
+                variantId: rule.variantId,
+                date: today,
+              },
+            },
+            update: {
+              unitsSold: { increment: unitsSoldDelta },
+            },
+            create: {
+              shop,
+              variantId: rule.variantId,
+              date: today,
+              unitsSold: unitsSoldDelta,
+            },
+          });
+          console.log(`[Inventory Webhook] Automatically tracked ${unitsSoldDelta} units sold today for ${rule.title} (${rule.variantTitle})`);
+        }
+      }
+
       await prisma.variantSupplierRule.updateMany({
         where: {
           shop,
