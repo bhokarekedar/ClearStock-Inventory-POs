@@ -46,22 +46,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // 1. Fetch Suppliers
   const suppliersDb = await prisma.supplier.findMany({
+    where: { shop },
     orderBy: { name: "asc" },
   });
 
-  // 2. Fetch Sourcing Rules (filter by shop, or fallback to all seeded rules in local dev)
-  let rulesDb = await prisma.variantSupplierRule.findMany({
+  // 2. Fetch Sourcing Rules strictly for the current shop
+  const rulesDb = await prisma.variantSupplierRule.findMany({
     where: { shop },
     include: { supplier: true },
     orderBy: { createdAt: "asc" },
   });
-
-  if (rulesDb.length === 0) {
-    rulesDb = await prisma.variantSupplierRule.findMany({
-      include: { supplier: true },
-      orderBy: { createdAt: "asc" },
-    });
-  }
 
   // 3. Date window boundaries for ADS calculations
   const now = new Date();
@@ -74,9 +68,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const date7dAgo = new Date(now);
   date7dAgo.setDate(date7dAgo.getDate() - 7);
 
-  // 4. Fetch 90 days of daily sales records from PostgreSQL
+  // 4. Fetch 90 days of daily sales records from PostgreSQL for current shop
   const salesDb = await prisma.dailySalesAggregator.findMany({
     where: {
+      shop,
       date: { gte: date90dAgo },
     },
   });
@@ -84,6 +79,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // 5. Fetch active incoming PO line items to prevent double-ordering
   const openPurchaseOrders = await prisma.purchaseOrder.findMany({
     where: {
+      shop,
       status: { in: ["ORDERED", "PARTIALLY_RECEIVED"] },
     },
     include: {
@@ -96,6 +92,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const allReceivedItems = await prisma.purchaseOrderItem.findMany({
     where: {
       purchaseOrder: {
+        shop,
         status: { not: "CANCELLED" },
       },
       quantityReceived: { gt: 0 },
@@ -183,7 +180,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 // ---------------------------------------------------------------------------
-// Realistic Mock Data for Replenishment Dashboard
+// Replenishment Data Types & Interfaces
 // ---------------------------------------------------------------------------
 export interface ReplenishmentItem {
   id: string;
@@ -254,8 +251,10 @@ export function computeReplenishmentMath(
   }
 
   // Days of current stock on hand (Runway)
-  const daysOfCoverageOnHand = ads > 0 ? Math.floor(item.stockOnHand / ads) : 999;
-  const isOverstocked = daysOfCoverageOnHand > 90;
+  // If no stock on hand, runway is 0. If no sales velocity (ads == 0), runway is not measurable (0 days, not overstocked).
+  const daysOfCoverageOnHand =
+    item.stockOnHand <= 0 ? 0 : ads > 0 ? Math.floor(item.stockOnHand / ads) : 0;
+  const isOverstocked = ads > 0 && daysOfCoverageOnHand > 90;
   const deadCashValue = isOverstocked ? item.stockOnHand * item.unitCost : 0;
 
   // "When to buy" Status indicator (Critical, Warning, Info, Success)
@@ -974,7 +973,15 @@ export default function ReplenishmentDashboard() {
                           >
                             {row.stockOnHand}
                           </Text>
-                          {calc.daysOfCoverageOnHand <= 7 ? (
+                          {row.stockOnHand <= 0 ? (
+                            <Badge tone="critical" size="small">
+                              0d left
+                            </Badge>
+                          ) : calc.ads === 0 ? (
+                            <Badge tone="info" size="small">
+                              No sales
+                            </Badge>
+                          ) : calc.daysOfCoverageOnHand <= 7 ? (
                             <Badge tone="critical" size="small">
                               {`${calc.daysOfCoverageOnHand}d left`}
                             </Badge>

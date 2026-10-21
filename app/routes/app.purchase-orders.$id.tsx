@@ -50,9 +50,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const rawId = params.id || "";
   const poIdOrNumber = rawId.toUpperCase();
 
-  // 1. Fetch Purchase Order from PostgreSQL
+  // 1. Fetch Purchase Order from PostgreSQL strictly for this shop
   const po = await prisma.purchaseOrder.findFirst({
     where: {
+      shop: session.shop,
       OR: [
         { poNumber: poIdOrNumber },
         { id: rawId },
@@ -65,36 +66,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   });
 
   if (!po) {
-    return {
-      po: {
-        id: "fallback",
-        poNumber: poIdOrNumber || "PO-1001",
-        status: "DRAFT",
-        supplierName: "Apex Apparel Ltd.",
-        supplierEmail: "orders@apexapparel.example.com",
-        carrier: "DHL Express Freight",
-        notes: "Spring restock batch #1 - Standard delivery.",
-        expectedArrival: new Date(Date.now() + 3 * 86400000).toISOString().split("T")[0],
-        createdAt: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-        items: [
-          {
-            id: "fallback-item-1",
-            variantId: "gid://shopify/ProductVariant/44129481926",
-            inventoryItemId: "gid://shopify/InventoryItem/48192841294",
-            title: "Thermal Waffle Crewneck",
-            variantTitle: "Heather Grey / Medium",
-            sku: "WFL-GRY-M",
-            supplierSku: "WFL-GRY-M",
-            imageUrl:
-              "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
-            unitCost: 14.0,
-            orderedQty: 50,
-            receivedQty: 0,
-          },
-        ],
-      },
-      shopDomain: session.shop,
-    };
+    return redirect("/app/purchase-orders");
   }
 
   return {

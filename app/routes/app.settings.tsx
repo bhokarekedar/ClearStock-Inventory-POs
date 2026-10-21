@@ -26,9 +26,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = session.shop;
 
   let settings = await (prisma as any).appSettings.findFirst({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
-    },
+    where: { shop },
   });
 
   if (!settings) {
@@ -45,15 +43,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const rulesCount = await prisma.variantSupplierRule.count({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
-    },
+    where: { shop },
   });
 
   const salesCount = await prisma.dailySalesAggregator.count({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
-    },
+    where: { shop },
   });
 
   return {

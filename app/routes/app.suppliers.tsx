@@ -186,7 +186,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "ASSIGN_SKU") {
     const variantId = String(formData.get("variantId"));
     const supplierId = String(formData.get("supplierId"));
-    const unitCost = Math.max(0.01, parseFloat(String(formData.get("unitCost") || "10.0")));
+    const unitCost = Math.max(0, parseFloat(String(formData.get("unitCost") || "0")));
     const packSize = Math.max(1, parseInt(String(formData.get("packSize") || "1"), 10));
     const minOrderQty = Math.max(1, parseInt(String(formData.get("minOrderQty") || "1"), 10));
     const leadTimeStr = formData.get("leadTimeDays");
@@ -357,9 +357,9 @@ export default function SuppliersPage() {
   const [selectedVariantId, setSelectedVariantId] = useState(rules[0]?.variantId || "");
   const [skuInputValue, setSkuInputValue] = useState(getVariantLabel(rules[0]));
   const [visibleSkuCount, setVisibleSkuCount] = useState(50);
-  const [assignCost, setAssignCost] = useState(String(rules[0]?.unitCost || "10.0"));
-  const [assignPackSize, setAssignPackSize] = useState("12");
-  const [assignMoq, setAssignMoq] = useState("24");
+  const [assignCost, setAssignCost] = useState(String(rules[0]?.unitCost ?? "0.00"));
+  const [assignPackSize, setAssignPackSize] = useState(String(rules[0]?.packSize ?? "1"));
+  const [assignMoq, setAssignMoq] = useState(String(rules[0]?.minOrderQty ?? "1"));
   const [syncToShopifyVendor, setSyncToShopifyVendor] = useState(true);
   const [syncToShopifyCost, setSyncToShopifyCost] = useState(true);
 
@@ -394,7 +394,9 @@ export default function SuppliersPage() {
     setSelectedVariantId(variantId);
     const item = rules.find((c) => c.variantId === variantId);
     if (item) {
-      setAssignCost(String(item.unitCost));
+      setAssignCost(String(item.unitCost ?? "0.00"));
+      setAssignPackSize(String(item.packSize ?? "1"));
+      setAssignMoq(String(item.minOrderQty ?? "1"));
       setSkuInputValue(getVariantLabel(item));
     }
   };
@@ -491,7 +493,7 @@ export default function SuppliersPage() {
         intent: "ASSIGN_SKU",
         supplierId: activeSupplierForSkus.id,
         variantId: selectedVariantId,
-        unitCost: assignCost || "10",
+        unitCost: assignCost || "0",
         packSize: assignPackSize || "1",
         minOrderQty: assignMoq || "1",
         syncToShopifyVendor: String(syncToShopifyVendor),

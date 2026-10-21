@@ -77,17 +77,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // 1. Fetch all suppliers for selection
   const suppliersDb = await prisma.supplier.findMany({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
-    },
+    where: { shop },
     orderBy: { name: "asc" },
   });
 
   // 2. Fetch all rules for the shop with supplier and catalog details
   const allRulesDb = await prisma.variantSupplierRule.findMany({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
-    },
+    where: { shop },
     include: { supplier: true },
     orderBy: { variantId: "asc" },
   });
@@ -99,12 +95,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const salesDb = await prisma.dailySalesAggregator.findMany({
     where: {
+      shop,
       date: { gte: date30dAgo },
     },
   });
 
   const openPurchaseOrders = await prisma.purchaseOrder.findMany({
     where: {
+      shop,
       status: { in: ["ORDERED", "PARTIALLY_RECEIVED"] },
     },
     include: {
@@ -116,6 +114,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const allReceivedItems = await prisma.purchaseOrderItem.findMany({
     where: {
       purchaseOrder: {
+        shop,
         status: { not: "CANCELLED" },
       },
       quantityReceived: { gt: 0 },
