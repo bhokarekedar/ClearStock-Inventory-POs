@@ -23,6 +23,7 @@ import {
   Listbox,
   Icon,
   Checkbox,
+  Tag,
 } from "@shopify/polaris";
 import { PlusIcon, EditIcon, LinkIcon, SearchIcon, ProductIcon, RefreshIcon } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -184,13 +185,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { ok: true, action: "updated", supplier: updated };
   }
 
-  // ASSIGN or REASSIGN SKU to a Supplier
+  // ASSIGN or REASSIGN SKU to a Supplier (Supports Single & Multi-Select)
   if (intent === "ASSIGN_SKU") {
-    const variantId = String(formData.get("variantId"));
-    const productId = String(formData.get("productId") || "");
+    const variantIdsJson = formData.get("variantIds");
+    const parsedVariantIds = variantIdsJson ? (JSON.parse(String(variantIdsJson)) as string[]) : [];
+    const singleVariantId = String(formData.get("variantId") || "");
+    const variantIds = parsedVariantIds.length > 0 ? parsedVariantIds : singleVariantId ? [singleVariantId] : [];
+
     const supplierId = String(formData.get("supplierId"));
     const applyToAllVariants = formData.get("applyToAllVariants") === "true";
-    const unitCost = Math.max(0, parseFloat(String(formData.get("unitCost") || "0")));
+    const unitCostStr = formData.get("unitCost");
+    const hasUnitCostOverride = Boolean(unitCostStr && String(unitCostStr).trim() !== "" && parseFloat(String(unitCostStr)) > 0);
+    const unitCost = hasUnitCostOverride ? parseFloat(String(unitCostStr)) : 0;
     const packSize = Math.max(1, parseInt(String(formData.get("packSize") || "1"), 10));
     const minOrderQty = Math.max(1, parseInt(String(formData.get("minOrderQty") || "1"), 10));
     const leadTimeStr = formData.get("leadTimeDays");
@@ -198,42 +204,61 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const syncVendor = formData.get("syncToShopifyVendor") === "true";
     const syncCost = formData.get("syncToShopifyCost") === "true";
 
-    const existingRule = await prisma.variantSupplierRule.findUnique({
+    if (variantIds.length === 0) {
+      return { ok: false, error: "No products or variants selected." };
+    }
+
+    // Find all directly selected rules
+    const directlySelectedRules = await prisma.variantSupplierRule.findMany({
       where: {
-        shop_variantId: {
-          shop,
-          variantId,
-        },
+        shop,
+        variantId: { in: variantIds },
       },
     });
 
-    if (existingRule) {
-      // Find all target variants (either all variants of the product or just this single variant)
-      const targetProductId = productId || existingRule.productId;
-      const targetRules = applyToAllVariants && targetProductId
-        ? await prisma.variantSupplierRule.findMany({
-            where: { shop, productId: targetProductId },
-          })
-        : [existingRule];
+    if (directlySelectedRules.length === 0) {
+      return { ok: false, error: "Selected variants not found in sourcing rules." };
+    }
 
-      const targetRuleIds = targetRules.map((r) => r.id);
+    // If applyToAllVariants is active, expand to include all variants sharing the same productIds
+    let targetRules = directlySelectedRules;
+    if (applyToAllVariants) {
+      const productIds = Array.from(new Set(directlySelectedRules.map((r) => r.productId).filter(Boolean))) as string[];
+      if (productIds.length > 0) {
+        targetRules = await prisma.variantSupplierRule.findMany({
+          where: {
+            shop,
+            productId: { in: productIds },
+          },
+        });
+      }
+    }
 
-      // 1. Update rules in ClearStock PostgreSQL
-      await prisma.variantSupplierRule.updateMany({
-        where: { id: { in: targetRuleIds } },
-        data: {
-          supplierId,
-          unitCost,
-          packSize,
-          minOrderQty,
-          ...(leadTimeDays !== null ? { leadTimeDays } : {}),
-        },
-      });
+    const targetRuleIds = targetRules.map((r) => r.id);
+    const updateData: any = {
+      supplierId,
+      packSize,
+      minOrderQty,
+      ...(leadTimeDays !== null ? { leadTimeDays } : {}),
+    };
+    if (hasUnitCostOverride) {
+      updateData.unitCost = unitCost;
+    }
 
-      const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
+    // 1. Update rules in ClearStock PostgreSQL
+    await prisma.variantSupplierRule.updateMany({
+      where: { id: { in: targetRuleIds } },
+      data: updateData,
+    });
 
-      // 2. Optional Two-Way Live Sync of Vendor to Shopify (Product Level)
-      if (syncVendor && sup && targetProductId?.startsWith("gid://shopify/Product/")) {
+    const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
+
+    // 2. Optional Two-Way Live Sync of Vendor to Shopify (Product Level)
+    if (syncVendor && sup) {
+      const distinctProductIds = Array.from(
+        new Set(targetRules.map((r) => r.productId).filter((id): id is string => Boolean(id && id.startsWith("gid://shopify/Product/")))),
+      );
+      for (const prodId of distinctProductIds) {
         try {
           await admin.graphql(
             `#graphql
@@ -252,7 +277,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             {
               variables: {
                 input: {
-                  id: targetProductId,
+                  id: prodId,
                   vendor: sup.name,
                 },
               },
@@ -262,48 +287,45 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           console.warn("Two-way Shopify vendor sync skipped:", e);
         }
       }
+    }
 
-      // 3. Optional Two-Way Live Sync of Unit Cost to Shopify COGS (Variant Level)
-      if (syncCost && unitCost > 0) {
-        for (const rule of targetRules) {
-          if (rule.inventoryItemId?.startsWith("gid://shopify/InventoryItem/")) {
-            try {
-              await admin.graphql(
-                `#graphql
-                mutation updateInventoryCost($id: ID!, $input: InventoryItemInput!) {
-                  inventoryItemUpdate(id: $id, input: $input) {
-                    userErrors {
-                      field
-                      message
-                    }
+    // 3. Optional Two-Way Live Sync of Unit Cost to Shopify COGS (Variant Level)
+    if (syncCost && hasUnitCostOverride) {
+      for (const rule of targetRules) {
+        if (rule.inventoryItemId?.startsWith("gid://shopify/InventoryItem/")) {
+          try {
+            await admin.graphql(
+              `#graphql
+              mutation updateInventoryCost($id: ID!, $input: InventoryItemInput!) {
+                inventoryItemUpdate(id: $id, input: $input) {
+                  userErrors {
+                    field
+                    message
                   }
-                }`,
-                {
-                  variables: {
-                    id: rule.inventoryItemId,
-                    input: {
-                      cost: unitCost,
-                    },
+                }
+              }`,
+              {
+                variables: {
+                  id: rule.inventoryItemId,
+                  input: {
+                    cost: unitCost,
                   },
                 },
-              );
-            } catch (e) {
-              console.warn("Two-way Shopify COGS sync skipped:", e);
-            }
+              },
+            );
+          } catch (e) {
+            console.warn("Two-way Shopify COGS sync skipped:", e);
           }
         }
       }
-
-      return {
-        ok: true,
-        action: "sku_assigned",
-        count: targetRules.length,
-        productTitle: existingRule.title,
-        variantId,
-      };
     }
 
-    return { ok: false, error: "Rule not found for this variant." };
+    return {
+      ok: true,
+      action: "sku_assigned",
+      count: targetRules.length,
+      supplierName: sup?.name || "supplier",
+    };
   }
 
   // Manual Live Store Catalog Ingestion from Shopify
@@ -407,42 +429,38 @@ export default function SuppliersPage() {
   const getVariantLabel = (item?: { title: string; variantTitle: string; sku: string }) =>
     item ? `${item.title}${item.variantTitle ? ` • ${item.variantTitle}` : ""} (${item.sku || "No SKU"})` : "";
 
-  // Form Fields for Assigning SKU with Real-time Search & Virtualized Chunking
-  const [selectedVariantId, setSelectedVariantId] = useState(rules[0]?.variantId || "");
-  const [skuInputValue, setSkuInputValue] = useState(getVariantLabel(rules[0]));
+  // Multi-Select SKU state for supplier connection
+  const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
+  const [skuInputValue, setSkuInputValue] = useState("");
   const [visibleSkuCount, setVisibleSkuCount] = useState(50);
-  const [assignCost, setAssignCost] = useState(String(rules[0]?.unitCost ?? "0.00"));
-  const [assignPackSize, setAssignPackSize] = useState(String(rules[0]?.packSize ?? "1"));
-  const [assignMoq, setAssignMoq] = useState(String(rules[0]?.minOrderQty ?? "1"));
+  const [assignCost, setAssignCost] = useState("");
+  const [assignPackSize, setAssignPackSize] = useState("12");
+  const [assignMoq, setAssignMoq] = useState("24");
   const [syncToShopifyVendor, setSyncToShopifyVendor] = useState(true);
   const [syncToShopifyCost, setSyncToShopifyCost] = useState(true);
   const [applyToAllVariants, setApplyToAllVariants] = useState(true);
 
-  const selectedCatalogItem = useMemo(() => {
-    return rules.find((c) => c.variantId === selectedVariantId) || rules[0] || null;
-  }, [selectedVariantId, rules]);
+  // Selected rules objects
+  const selectedRules = useMemo(() => {
+    return rules.filter((r) => selectedVariantIds.includes(r.variantId));
+  }, [selectedVariantIds, rules]);
 
-  // Find all sibling variants of the same product
-  const siblingVariants = useMemo(() => {
-    if (!selectedCatalogItem?.productId) return [];
-    return rules.filter((r) => r.productId === selectedCatalogItem.productId);
-  }, [selectedCatalogItem, rules]);
+  // Selected distinct products count
+  const selectedProductCount = useMemo(() => {
+    return new Set(selectedRules.map((r) => r.productId || r.title)).size;
+  }, [selectedRules]);
 
-  // Filter variants: if input matches the selected item label or is empty, show full catalog; otherwise filter by keywords
+  // Filter variants by query string
   const filteredVariants = useMemo(() => {
     const query = skuInputValue.trim().toLowerCase();
-    const currentLabel = selectedCatalogItem ? getVariantLabel(selectedCatalogItem).toLowerCase() : "";
-
-    if (!query || query === currentLabel) {
-      return rules;
-    }
+    if (!query) return rules;
 
     const searchTerms = query.split(/\s+/).filter(Boolean);
     return rules.filter((v) => {
       const haystack = `${v.title} ${v.variantTitle} ${v.sku}`.toLowerCase();
       return searchTerms.every((term) => haystack.includes(term));
     });
-  }, [skuInputValue, selectedCatalogItem, rules]);
+  }, [skuInputValue, rules]);
 
   const displayedVariants = useMemo(() => {
     return filteredVariants.slice(0, visibleSkuCount);
@@ -450,16 +468,41 @@ export default function SuppliersPage() {
 
   const hasMoreVariants = filteredVariants.length > visibleSkuCount;
 
-  // Sync default cost and populated input label when variant selection changes
-  const handleVariantSelectChange = (variantId: string) => {
-    setSelectedVariantId(variantId);
-    const item = rules.find((c) => c.variantId === variantId);
-    if (item) {
+  // Toggle selection for a variant (and optionally its sibling variants)
+  const handleToggleVariant = (variantId: string) => {
+    const item = rules.find((r) => r.variantId === variantId);
+    const idsToToggle = applyToAllVariants && item?.productId
+      ? rules.filter((r) => r.productId === item.productId).map((r) => r.variantId)
+      : [variantId];
+
+    setSelectedVariantIds((prev) => {
+      const allSelected = idsToToggle.every((id) => prev.includes(id));
+      if (allSelected) {
+        return prev.filter((id) => !idsToToggle.includes(id));
+      } else {
+        return Array.from(new Set([...prev, ...idsToToggle]));
+      }
+    });
+
+    if (item && selectedVariantIds.length === 0 && !assignCost) {
       setAssignCost(String(item.unitCost ?? "0.00"));
-      setAssignPackSize(String(item.packSize ?? "1"));
-      setAssignMoq(String(item.minOrderQty ?? "1"));
-      setSkuInputValue(getVariantLabel(item));
+      setAssignPackSize(String(item.packSize ?? "12"));
+      setAssignMoq(String(item.minOrderQty ?? "24"));
     }
+  };
+
+  const handleSelectAllFiltered = () => {
+    let idsToAdd = filteredVariants.map((v) => v.variantId);
+    if (applyToAllVariants) {
+      const productIds = Array.from(new Set(filteredVariants.map((v) => v.productId).filter(Boolean)));
+      idsToAdd = rules.filter((r) => productIds.includes(r.productId)).map((r) => r.variantId);
+    }
+    setSelectedVariantIds((prev) => Array.from(new Set([...prev, ...idsToAdd])));
+  };
+
+  const handleClearSelection = () => {
+    setSelectedVariantIds([]);
+    setAssignCost("");
   };
 
   // Notify on action response
@@ -473,10 +516,9 @@ export default function SuppliersPage() {
         setModalOpen(false);
       } else if (actionData.action === "sku_assigned") {
         const count = (actionData as any).count || 1;
-        const msg = count > 1
-          ? `All ${count} variants of "${(actionData as any).productTitle || "product"}" assigned to supplier!`
-          : "SKU successfully assigned to supplier!";
-        shopify.toast.show(msg);
+        shopify.toast.show(
+          `Successfully connected ${count} SKU${count === 1 ? "" : "s"} to ${(actionData as any).supplierName || "supplier"}!`,
+        );
       }
     } else if (actionData?.error) {
       setFormError(actionData.error);
@@ -511,15 +553,9 @@ export default function SuppliersPage() {
 
   const handleOpenSkuModal = (sup: SupplierItem) => {
     setActiveSupplierForSkus(sup);
-    if (rules.length > 0) {
-      setSelectedVariantId(rules[0].variantId);
-      setSkuInputValue(getVariantLabel(rules[0]));
-      setAssignCost(String(rules[0].unitCost));
-    } else {
-      setSelectedVariantId("");
-      setSkuInputValue("");
-      setAssignCost("10.0");
-    }
+    setSelectedVariantIds([]);
+    setSkuInputValue("");
+    setAssignCost("");
     setVisibleSkuCount(50);
     setAssignPackSize("12");
     setAssignMoq("24");
@@ -551,16 +587,15 @@ export default function SuppliersPage() {
   };
 
   const handleAssignSkuToSupplier = () => {
-    if (!activeSupplierForSkus) return;
+    if (!activeSupplierForSkus || selectedVariantIds.length === 0) return;
 
     submit(
       {
         intent: "ASSIGN_SKU",
         supplierId: activeSupplierForSkus.id,
-        variantId: selectedVariantId,
-        productId: selectedCatalogItem?.productId || "",
+        variantIds: JSON.stringify(selectedVariantIds),
         applyToAllVariants: String(applyToAllVariants),
-        unitCost: assignCost || "0",
+        unitCost: assignCost || "",
         packSize: assignPackSize || "1",
         minOrderQty: assignMoq || "1",
         syncToShopifyVendor: String(syncToShopifyVendor),
@@ -987,7 +1022,7 @@ export default function SuppliersPage() {
                           setSkuInputValue(val);
                           setVisibleSkuCount(50);
                         }}
-                        label="Search & Select Product Variant"
+                        label="Search & Select Product Variants"
                         value={skuInputValue}
                         placeholder="Search by product name, color, or SKU..."
                         clearButton={Boolean(skuInputValue)}
@@ -997,9 +1032,9 @@ export default function SuppliersPage() {
                         }}
                         autoComplete="off"
                         helpText={
-                          selectedCatalogItem
-                            ? `Selected: ${selectedCatalogItem.title} (${selectedCatalogItem.sku || "No SKU"}) • Unit Cost: $${selectedCatalogItem.unitCost.toFixed(2)}`
-                            : "Search and select a product to assign to this supplier"
+                          selectedVariantIds.length > 0
+                            ? `${selectedVariantIds.length} SKU${selectedVariantIds.length === 1 ? "" : "s"} selected across ${selectedProductCount} product${selectedProductCount === 1 ? "" : "s"}`
+                            : "Search and click products below to select multiple items to connect to this supplier"
                         }
                       />
                     }
@@ -1007,25 +1042,40 @@ export default function SuppliersPage() {
                     <div className="clearstock-combobox-container">
                       <div className="clearstock-combobox-header">
                         <span className="clearstock-combobox-header-title">
-                          {skuInputValue &&
-                          skuInputValue.trim().toLowerCase() !== getVariantLabel(selectedCatalogItem).toLowerCase()
+                          {skuInputValue
                             ? `Matching Products (${filteredVariants.length})`
                             : `Catalog Products (${filteredVariants.length} items)`}
                         </span>
-                        <span className="clearstock-combobox-header-hint">
-                          Scroll to explore • Click row to select
-                        </span>
+                        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                          <Button
+                            variant="plain"
+                            size="micro"
+                            onClick={handleSelectAllFiltered}
+                          >
+                            {`Select All (${filteredVariants.length})`}
+                          </Button>
+                          {selectedVariantIds.length > 0 && (
+                            <Button
+                              variant="plain"
+                              size="micro"
+                              tone="critical"
+                              onClick={handleClearSelection}
+                            >
+                              {`Clear (${selectedVariantIds.length})`}
+                            </Button>
+                          )}
+                        </div>
                       </div>
 
                       <div className="clearstock-combobox-scroll">
                         {displayedVariants.length > 0 ? (
                           <Listbox
                             onSelect={(val) => {
-                              handleVariantSelectChange(val);
+                              handleToggleVariant(val);
                             }}
                           >
                             {displayedVariants.map((item) => {
-                              const isSelected = selectedVariantId === item.variantId;
+                              const isSelected = selectedVariantIds.includes(item.variantId);
                               const isAlreadyLinked = activeSupplierRules.some(
                                 (r) => r.variantId === item.variantId,
                               );
@@ -1039,6 +1089,15 @@ export default function SuppliersPage() {
                                   <div
                                     className={`clearstock-sku-option-row ${isSelected ? "selected" : ""} ${isAlreadyLinked ? "linked" : ""}`}
                                   >
+                                    <div style={{ display: "flex", alignItems: "center", paddingRight: 4 }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        onChange={() => {}}
+                                        style={{ width: 16, height: 16, cursor: "pointer", accentColor: "#008060" }}
+                                      />
+                                    </div>
+
                                     <div className="clearstock-sku-thumb">
                                       <Icon source={ProductIcon} tone="base" />
                                     </div>
@@ -1092,6 +1151,26 @@ export default function SuppliersPage() {
                     </div>
                   </Combobox>
 
+                  {selectedRules.length > 0 && (
+                    <Box padding="200" background="bg-surface-secondary" borderRadius="200">
+                      <InlineStack gap="200" align="start" blockAlign="center" wrap>
+                        <Text as="span" variant="bodySm" fontWeight="semibold">
+                          Selected ({selectedVariantIds.length} SKUs across {selectedProductCount} products):
+                        </Text>
+                        {selectedRules.slice(0, 8).map((r) => (
+                          <Tag key={r.variantId} onRemove={() => handleToggleVariant(r.variantId)}>
+                            {r.title} • {r.variantTitle || r.sku}
+                          </Tag>
+                        ))}
+                        {selectedRules.length > 8 && (
+                          <Text as="span" variant="bodySm" tone="subdued">
+                            +{selectedRules.length - 8} more
+                          </Text>
+                        )}
+                      </InlineStack>
+                    </Box>
+                  )}
+
                   <InlineStack gap="300">
                     <div style={{ flex: 1 }}>
                       <TextField
@@ -1101,7 +1180,8 @@ export default function SuppliersPage() {
                         value={assignCost}
                         onChange={setAssignCost}
                         autoComplete="off"
-                        helpText="Internal cost paid to vendor. Does NOT affect customer retail selling price."
+                        placeholder="Keep variant costs or override"
+                        helpText="Leave blank to preserve each variant's individual cost, or enter an amount to override."
                       />
                     </div>
                     <div style={{ flex: 1 }}>
@@ -1128,34 +1208,32 @@ export default function SuppliersPage() {
 
                   <Divider />
 
-                  {siblingVariants.length > 1 && (
-                    <Banner tone="info">
-                      <Text as="p" variant="bodySm">
-                        <strong>Product Sourcing:</strong> This product has{" "}
-                        <strong>{siblingVariants.length} variants</strong> (
-                        {siblingVariants.map((v) => v.variantTitle).join(", ")}).
-                      </Text>
-                    </Banner>
-                  )}
+                  <Banner tone="info">
+                    <Text as="p" variant="bodySm">
+                      <strong>Product Sourcing:</strong> Selecting any product automatically links all its variant sizes to <strong>{activeSupplierForSkus?.name}</strong> when "Apply to all variants" is checked. This ensures consistent vendor assignment across Shopify so variants can be reordered together on the same PO.
+                    </Text>
+                  </Banner>
 
                   <InlineStack align="space-between" blockAlign="center" gap="400">
                     <BlockStack gap="200">
-                      {siblingVariants.length > 1 && (
-                        <Checkbox
-                          label={`Apply supplier to all ${siblingVariants.length} variants of "${selectedCatalogItem?.title}" (Recommended)`}
-                          checked={applyToAllVariants}
-                          onChange={setApplyToAllVariants}
-                          helpText="Ensures all sizes share the same vendor in Shopify so they can be reordered together on the same Purchase Order."
-                        />
-                      )}
                       <Checkbox
-                        label={`Update Shopify Product Vendor to "${activeSupplierForSkus?.name}"`}
+                        label="Apply supplier to all variants of selected products (Recommended)"
+                        checked={applyToAllVariants}
+                        onChange={setApplyToAllVariants}
+                        helpText="Shopify manages vendors at the product level. Ensures all sizes/colors of selected products share this supplier."
+                      />
+                      <Checkbox
+                        label={`Update Shopify Product Vendor to "${activeSupplierForSkus?.name || ""}"`}
                         checked={syncToShopifyVendor}
                         onChange={setSyncToShopifyVendor}
                         helpText="Keeps Shopify storefront vendor field synchronized to prevent sync conflicts"
                       />
                       <Checkbox
-                        label={`Sync Unit Cost ($${parseFloat(assignCost || "0").toFixed(2)}) to Shopify Cost per item (COGS)`}
+                        label={
+                          assignCost && parseFloat(assignCost) > 0
+                            ? `Sync Override Cost ($${parseFloat(assignCost).toFixed(2)}) to Shopify Cost per item (COGS)`
+                            : "Sync Unit Cost to Shopify Cost per item (COGS) for selected items"
+                        }
                         checked={syncToShopifyCost}
                         onChange={setSyncToShopifyCost}
                         helpText="Internal accounting only. Updates Shopify profit reports — will NEVER change the customer retail selling price."
@@ -1166,9 +1244,12 @@ export default function SuppliersPage() {
                       variant="primary"
                       size="large"
                       loading={isSubmitting}
+                      disabled={selectedVariantIds.length === 0}
                       onClick={handleAssignSkuToSupplier}
                     >
-                      Connect SKU to Supplier
+                      {selectedVariantIds.length === 0
+                        ? "Select Products to Connect"
+                        : `Connect ${selectedVariantIds.length} Selected SKU${selectedVariantIds.length === 1 ? "" : "s"} to ${activeSupplierForSkus?.name || "Supplier"}`}
                     </Button>
                   </InlineStack>
                 </BlockStack>
