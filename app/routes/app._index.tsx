@@ -55,6 +55,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 id
                 sku
                 title
+                inventoryQuantity
                 inventoryItem {
                   id
                   inventoryLevels(first: 20) {
@@ -63,6 +64,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                         isActive
                       }
                       quantities(names: ["available"]) {
+                        name
                         quantity
                       }
                     }
@@ -79,16 +81,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       for (const edge of variants) {
         const v = edge.node;
-        const totalAvailable = (v.inventoryItem?.inventoryLevels?.nodes || []).reduce(
-          (sum: number, lvl: any) => {
-            if (lvl.location?.isActive) {
-              const avail = lvl.quantities?.find((q: any) => q.name === "available")?.quantity || 0;
-              return sum + avail;
-            }
-            return sum;
-          },
-          0,
-        );
+        let totalAvailable = typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : null;
+
+        if (totalAvailable === null) {
+          totalAvailable = (v.inventoryItem?.inventoryLevels?.nodes || []).reduce(
+            (sum: number, lvl: any) => {
+              if (lvl.location?.isActive) {
+                const avail = lvl.quantities?.find((q: any) => !q.name || q.name === "available")?.quantity || lvl.quantities?.[0]?.quantity || 0;
+                return sum + avail;
+              }
+              return sum;
+            },
+            0,
+          );
+        }
 
         await prisma.variantSupplierRule.updateMany({
           where: {

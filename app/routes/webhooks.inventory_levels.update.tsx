@@ -32,6 +32,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                     isActive
                   }
                   quantities(names: ["available"]) {
+                    name
                     quantity
                   }
                 }
@@ -47,7 +48,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const levels = json.data?.inventoryItem?.inventoryLevels?.nodes || [];
         totalAvailable = levels.reduce((sum: number, lvl: any) => {
           if (lvl.location?.isActive) {
-            const qty = lvl.quantities?.find((q: any) => q.name === "available")?.quantity || 0;
+            const qty = lvl.quantities?.find((q: any) => !q.name || q.name === "available")?.quantity || lvl.quantities?.[0]?.quantity || 0;
             return sum + qty;
           }
           return sum;
