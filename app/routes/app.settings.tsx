@@ -85,8 +85,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       defaultSafetyStockDays,
       defaultLeadTimeDays,
       autoRoundCasePacks,
-      emailAlerts,
-      alertEmail,
     },
     create: {
       shop,
@@ -94,8 +92,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       defaultSafetyStockDays,
       defaultLeadTimeDays,
       autoRoundCasePacks,
-      emailAlerts,
-      alertEmail,
     },
   });
 
@@ -117,8 +113,6 @@ export default function SettingsPage() {
   const [defaultSafetyDays, setDefaultSafetyDays] = useState<string>(String(settings.defaultSafetyStockDays));
   const [defaultLeadTime, setDefaultLeadTime] = useState<string>(String(settings.defaultLeadTimeDays));
   const [autoRound, setAutoRound] = useState<boolean>(settings.autoRoundCasePacks);
-  const [emailAlerts, setEmailAlerts] = useState<boolean>(settings.emailAlerts);
-  const [alertEmail, setAlertEmail] = useState<string>(settings.alertEmail || "");
 
   useEffect(() => {
     if (actionData?.ok && actionData.message) {
@@ -133,8 +127,6 @@ export default function SettingsPage() {
         defaultSafetyStockDays: defaultSafetyDays,
         defaultLeadTimeDays: defaultLeadTime,
         autoRoundCasePacks: String(autoRound),
-        emailAlerts: String(emailAlerts),
-        alertEmail,
       },
       { method: "post" },
     );
@@ -208,34 +200,6 @@ export default function SettingsPage() {
                   onChange={setAutoRound}
                   helpText="When enabled, replenishment quantities round up to carton multiples (e.g., 12, 24) to avoid broken master cases."
                 />
-              </BlockStack>
-            </Card>
-          </Layout.AnnotatedSection>
-
-          <Layout.AnnotatedSection
-            id="notifications"
-            title="Low-Stock Alerts & Email"
-            description="Receive proactive email digests when products drop below their reorder point."
-          >
-            <Card>
-              <BlockStack gap="300">
-                <Checkbox
-                  label="Send daily stockout risk notifications"
-                  checked={emailAlerts}
-                  onChange={setEmailAlerts}
-                  helpText="Sends an email digest whenever SKUs reach CRITICAL or DEFICIT status."
-                />
-
-                {emailAlerts && (
-                  <TextField
-                    label="Alert Recipient Email"
-                    type="email"
-                    value={alertEmail}
-                    onChange={setAlertEmail}
-                    autoComplete="email"
-                    placeholder="inventory-manager@yourbrand.com"
-                  />
-                )}
               </BlockStack>
             </Card>
           </Layout.AnnotatedSection>

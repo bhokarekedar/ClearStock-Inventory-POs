@@ -31,8 +31,6 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
-import { getCatalogItem } from "../catalog";
-
 export interface ReceivingLineItem {
   id: string;
   variantId: string;
@@ -117,16 +115,15 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         year: "numeric",
       }),
       items: po.items.map((item) => {
-        const catalog = getCatalogItem(item.variantId);
         return {
           id: item.id,
           variantId: item.variantId,
-          inventoryItemId: item.inventoryItemId || catalog.inventoryItemId || "",
-          title: item.title || catalog.title,
-          variantTitle: catalog.variantTitle || "Standard",
-          sku: item.sku || catalog.sku,
-          supplierSku: item.sku || catalog.sku,
-          imageUrl: catalog.imageUrl,
+          inventoryItemId: item.inventoryItemId || "",
+          title: item.title,
+          variantTitle: "",
+          sku: item.sku || "",
+          supplierSku: item.sku || "",
+          imageUrl: "",
           unitCost: Number(item.unitCost),
           orderedQty: item.quantityOrdered,
           receivedQty: item.quantityReceived ?? 0,

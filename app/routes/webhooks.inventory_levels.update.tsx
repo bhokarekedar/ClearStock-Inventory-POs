@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 import { isWebhookDuplicate, toGid } from "../webhook-handler.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -14,9 +15,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   // Inventory level updates from Shopify (e.g., POS sales, manual stock adjustments)
   const inventoryItemId = payload.inventory_item_id ? toGid("InventoryItem", payload.inventory_item_id) : null;
-  const available = payload.available;
+  const available = typeof payload.available === "number" ? payload.available : null;
 
-  console.log(`[Inventory Webhook] Level updated for item ${inventoryItemId}: available=${available}`);
+  if (inventoryItemId && available !== null) {
+    await prisma.variantSupplierRule.updateMany({
+      where: {
+        shop,
+        inventoryItemId,
+      },
+      data: {
+        availableStock: available,
+      },
+    });
+    console.log(`[Inventory Webhook] Persisted available=${available} for ${inventoryItemId} on ${shop}`);
+  }
 
   return new Response();
 };

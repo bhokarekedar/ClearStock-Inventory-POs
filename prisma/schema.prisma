@@ -64,6 +64,10 @@ model VariantSupplierRule {
   variantId          String // Shopify GID: gid://shopify/ProductVariant/XXXXX
   inventoryItemId    String? // Shopify GID: gid://shopify/InventoryItem/XXXXX (Needed for inventory adjustments)
   productId          String // Shopify GID: gid://shopify/Product/XXXXX
+  title              String   @default("Untitled Product")
+  variantTitle       String?
+  imageUrl           String?
+  availableStock     Int      @default(0)
   supplierId         String
   supplier           Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   supplierSku        String?

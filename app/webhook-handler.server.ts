@@ -100,6 +100,10 @@ export async function ingestShopifyProduct(payload: any, shop: string): Promise<
       const price = parseFloat(v.price) || 0;
       const defaultUnitCost = Math.max(1.0, Number((price * 0.4).toFixed(2))); // Sensible default 40% COGS
 
+      const variantTitle = v.title || null;
+      const imageUrl = payload.image?.src || payload.images?.[0]?.src || null;
+      const availableStock = typeof v.inventory_quantity === "number" ? v.inventory_quantity : 0;
+
       await prisma.variantSupplierRule.upsert({
         where: {
           shop_variantId: {
@@ -110,6 +114,10 @@ export async function ingestShopifyProduct(payload: any, shop: string): Promise<
         update: {
           productId,
           inventoryItemId,
+          title: rawTitle,
+          variantTitle,
+          imageUrl,
+          ...(typeof v.inventory_quantity === "number" ? { availableStock } : {}),
           supplierSku: sku,
           ...(supplierId ? { supplierId } : {}),
         },
@@ -118,6 +126,10 @@ export async function ingestShopifyProduct(payload: any, shop: string): Promise<
           variantId,
           productId,
           inventoryItemId,
+          title: rawTitle,
+          variantTitle,
+          imageUrl,
+          availableStock,
           supplierId,
           supplierSku: sku,
           unitCost: defaultUnitCost,

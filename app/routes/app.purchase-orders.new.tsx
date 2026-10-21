@@ -33,7 +33,6 @@ import {
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { getCatalogItem } from "../catalog";
 
 export interface DraftPOItem {
   id: string;
@@ -134,7 +133,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   function getRuleRecommendedQty(r: (typeof allRulesDb)[0]): { recommendedQty: number; deficit: number } {
-    const catalog = getCatalogItem(r.variantId);
     const variantSales = salesDb.filter((s) => s.variantId === r.variantId);
     const unitsSold30d = variantSales.reduce((sum: number, s) => sum + s.unitsSold, 0);
     const ads = Number((unitsSold30d / 30).toFixed(1));
@@ -147,7 +145,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .filter((p) => p.variantId === r.variantId)
       .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
     const totalReceived = receivedByVariant[r.variantId] || 0;
-    const stockOnHand = catalog.baseStockOnHand + totalReceived;
+    const stockOnHand = (r.availableStock || 0) + totalReceived;
 
     const rawDeficit = Math.max(0, reorderPoint - stockOnHand - stockOnOrder);
     if (rawDeficit > 0) {
@@ -167,19 +165,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const availableRules: AvailableRuleItem[] = allRulesDb.map((r) => {
-    const catalog = getCatalogItem(r.variantId);
     const { recommendedQty } = getRuleRecommendedQty(r);
     return {
       ruleId: r.id,
       variantId: r.variantId,
-      inventoryItemId: r.inventoryItemId || catalog.inventoryItemId || "",
+      inventoryItemId: r.inventoryItemId || "",
       supplierId: r.supplierId,
       supplierName: r.supplier.name,
-      title: catalog.title,
-      variantTitle: catalog.variantTitle,
-      sku: catalog.sku,
-      supplierSku: r.supplierSku || catalog.sku,
-      imageUrl: catalog.imageUrl,
+      title: r.title || "Untitled Product",
+      variantTitle: r.variantTitle || "",
+      sku: r.supplierSku || "",
+      supplierSku: r.supplierSku || "",
+      imageUrl: r.imageUrl || "",
       packSize: r.packSize,
       unitCost: Number(r.unitCost),
       minOrderQty: r.minOrderQty,
@@ -201,8 +198,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   let primarySupplier =
     (supplierParam ? suppliersDb.find((s) => s.id === supplierParam) : null) ||
     suppliersDb[0] || {
-      id: "sup-apex",
-      name: "Apex Apparel Ltd.",
+      id: "",
+      name: "Select Supplier",
       defaultLeadTime: 14,
     };
 
@@ -216,18 +213,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // 5. Pre-calculate true recommended case-pack quantities
   const draftItems: DraftPOItem[] = initialRules.map((r) => {
-    const catalog = getCatalogItem(r.variantId);
     const { recommendedQty, deficit } = getRuleRecommendedQty(r);
 
     return {
       id: r.id,
       variantId: r.variantId,
-      inventoryItemId: r.inventoryItemId || catalog.inventoryItemId || "",
-      title: catalog.title,
-      variantTitle: catalog.variantTitle,
-      sku: catalog.sku,
-      supplierSku: r.supplierSku || catalog.sku,
-      imageUrl: catalog.imageUrl,
+      inventoryItemId: r.inventoryItemId || "",
+      title: r.title || "Untitled Product",
+      variantTitle: r.variantTitle || "",
+      sku: r.supplierSku || "",
+      supplierSku: r.supplierSku || "",
+      imageUrl: r.imageUrl || "",
       packSize: r.packSize,
       calculatedDeficit: deficit,
       orderQuantity: recommendedQty,

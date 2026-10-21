@@ -30,15 +30,6 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { ingestShopifyProduct } from "../webhook-handler.server";
 
-import {
-  CATALOG_VARIANTS,
-  getCatalogItem,
-  searchCatalog,
-  type CatalogVariant,
-} from "../catalog";
-
-export { CATALOG_VARIANTS };
-
 export interface SupplierItem {
   id: string;
   name: string;
@@ -71,11 +62,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  // Fetch all suppliers for this shop (or all if dev)
+  // Fetch all suppliers for this shop
   let suppliersDb = await prisma.supplier.findMany({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }],
-    },
+    where: { shop },
     include: {
       rules: true,
       purchaseOrders: true,
@@ -85,9 +74,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Fetch all rules
   const rulesDb = await prisma.variantSupplierRule.findMany({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }],
-    },
+    where: { shop },
     include: { supplier: true },
     orderBy: { variantId: "asc" },
   });
@@ -111,16 +98,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }));
 
   const rules: RuleItem[] = rulesDb.map((r) => {
-    const catalog = getCatalogItem(r.variantId);
-
     return {
       id: r.id,
       variantId: r.variantId,
       supplierId: r.supplierId,
       supplierName: r.supplier.name,
-      title: catalog.title,
-      variantTitle: catalog.variantTitle,
-      sku: catalog.sku,
+      title: r.title || "Untitled Product",
+      variantTitle: r.variantTitle || "",
+      sku: r.supplierSku || "",
       unitCost: Number(r.unitCost),
       packSize: r.packSize,
       minOrderQty: r.minOrderQty,
@@ -207,75 +192,60 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const leadTimeStr = formData.get("leadTimeDays");
     const leadTimeDays = leadTimeStr ? parseInt(String(leadTimeStr), 10) : null;
 
-    const catalog = getCatalogItem(variantId);
-    const supplierSku = catalog.sku;
-
-    await prisma.variantSupplierRule.upsert({
+    const existingRule = await prisma.variantSupplierRule.findUnique({
       where: {
         shop_variantId: {
           shop,
           variantId,
         },
       },
-      update: {
-        supplierId,
-        unitCost,
-        packSize,
-        minOrderQty,
-        leadTimeDays,
-        supplierSku,
-        inventoryItemId: catalog.inventoryItemId,
-      },
-      create: {
-        shop,
-        variantId,
-        productId: catalog.productId,
-        inventoryItemId: catalog.inventoryItemId,
-        supplierId,
-        unitCost,
-        packSize,
-        minOrderQty,
-        leadTimeDays,
-        supplierSku,
-      },
     });
 
-    // Optional Two-Way Live Sync to Shopify
-    const syncVendor = formData.get("syncToShopifyVendor") === "true";
-    const syncCost = formData.get("syncToShopifyCost") === "true";
+    if (existingRule) {
+      await prisma.variantSupplierRule.update({
+        where: { id: existingRule.id },
+        data: {
+          supplierId,
+          unitCost,
+          packSize,
+          minOrderQty,
+          leadTimeDays,
+        },
+      });
 
-    if ((syncVendor || syncCost) && catalog?.productId?.startsWith("gid://shopify/Product/")) {
-      try {
-        const { admin } = await authenticate.admin(request);
-        const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
-        if (sup && syncVendor) {
-          await admin.graphql(
-            `#graphql
-            mutation updateProductVendor($input: ProductInput!) {
-              productUpdate(input: $input) {
-                product {
-                  id
-                  vendor
+      // Optional Two-Way Live Sync to Shopify
+      const syncVendor = formData.get("syncToShopifyVendor") === "true";
+      if (syncVendor && existingRule.productId?.startsWith("gid://shopify/Product/")) {
+        try {
+          const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
+          if (sup) {
+            await admin.graphql(
+              `#graphql
+              mutation updateProductVendor($input: ProductInput!) {
+                productUpdate(input: $input) {
+                  product {
+                    id
+                    vendor
+                  }
+                  userErrors {
+                    field
+                    message
+                  }
                 }
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }`,
-            {
-              variables: {
-                input: {
-                  id: catalog.productId,
-                  vendor: sup.name,
+              }`,
+              {
+                variables: {
+                  input: {
+                    id: existingRule.productId,
+                    vendor: sup.name,
+                  },
                 },
               },
-            },
-          );
+            );
+          }
+        } catch (e) {
+          console.log("Two-way Shopify vendor sync skipped:", e);
         }
-      } catch (e) {
-        // Safe fallback in dev/mock environments
-        console.log("Two-way Shopify vendor sync skipped or mock:", e);
       }
     }
 
@@ -380,38 +350,38 @@ export default function SuppliersPage() {
   const [formError, setFormError] = useState("");
 
   // Helper to format consistent variant label
-  const getVariantLabel = (item: (typeof CATALOG_VARIANTS)[0]) =>
-    `${item.title} • ${item.variantTitle} (${item.sku})`;
+  const getVariantLabel = (item?: { title: string; variantTitle: string; sku: string }) =>
+    item ? `${item.title}${item.variantTitle ? ` • ${item.variantTitle}` : ""} (${item.sku || "No SKU"})` : "";
 
   // Form Fields for Assigning SKU with Real-time Search & Virtualized Chunking
-  const [selectedVariantId, setSelectedVariantId] = useState(CATALOG_VARIANTS[0].variantId);
-  const [skuInputValue, setSkuInputValue] = useState(getVariantLabel(CATALOG_VARIANTS[0]));
+  const [selectedVariantId, setSelectedVariantId] = useState(rules[0]?.variantId || "");
+  const [skuInputValue, setSkuInputValue] = useState(getVariantLabel(rules[0]));
   const [visibleSkuCount, setVisibleSkuCount] = useState(50);
-  const [assignCost, setAssignCost] = useState(String(CATALOG_VARIANTS[0].defaultCost));
+  const [assignCost, setAssignCost] = useState(String(rules[0]?.unitCost || "10.0"));
   const [assignPackSize, setAssignPackSize] = useState("12");
   const [assignMoq, setAssignMoq] = useState("24");
   const [syncToShopifyVendor, setSyncToShopifyVendor] = useState(true);
   const [syncToShopifyCost, setSyncToShopifyCost] = useState(true);
 
   const selectedCatalogItem = useMemo(() => {
-    return CATALOG_VARIANTS.find((c) => c.variantId === selectedVariantId) || CATALOG_VARIANTS[0];
-  }, [selectedVariantId]);
+    return rules.find((c) => c.variantId === selectedVariantId) || rules[0] || null;
+  }, [selectedVariantId, rules]);
 
   // Filter variants: if input matches the selected item label or is empty, show full catalog; otherwise filter by keywords
   const filteredVariants = useMemo(() => {
     const query = skuInputValue.trim().toLowerCase();
-    const currentLabel = getVariantLabel(selectedCatalogItem).toLowerCase();
+    const currentLabel = selectedCatalogItem ? getVariantLabel(selectedCatalogItem).toLowerCase() : "";
 
     if (!query || query === currentLabel) {
-      return CATALOG_VARIANTS;
+      return rules;
     }
 
     const searchTerms = query.split(/\s+/).filter(Boolean);
-    return CATALOG_VARIANTS.filter((v) => {
+    return rules.filter((v) => {
       const haystack = `${v.title} ${v.variantTitle} ${v.sku}`.toLowerCase();
       return searchTerms.every((term) => haystack.includes(term));
     });
-  }, [skuInputValue, selectedCatalogItem]);
+  }, [skuInputValue, selectedCatalogItem, rules]);
 
   const displayedVariants = useMemo(() => {
     return filteredVariants.slice(0, visibleSkuCount);
@@ -422,10 +392,10 @@ export default function SuppliersPage() {
   // Sync default cost and populated input label when variant selection changes
   const handleVariantSelectChange = (variantId: string) => {
     setSelectedVariantId(variantId);
-    const catalog = CATALOG_VARIANTS.find((c) => c.variantId === variantId);
-    if (catalog) {
-      setAssignCost(String(catalog.defaultCost));
-      setSkuInputValue(getVariantLabel(catalog));
+    const item = rules.find((c) => c.variantId === variantId);
+    if (item) {
+      setAssignCost(String(item.unitCost));
+      setSkuInputValue(getVariantLabel(item));
     }
   };
 
@@ -474,10 +444,16 @@ export default function SuppliersPage() {
 
   const handleOpenSkuModal = (sup: SupplierItem) => {
     setActiveSupplierForSkus(sup);
-    setSelectedVariantId(CATALOG_VARIANTS[0].variantId);
-    setSkuInputValue(getVariantLabel(CATALOG_VARIANTS[0]));
+    if (rules.length > 0) {
+      setSelectedVariantId(rules[0].variantId);
+      setSkuInputValue(getVariantLabel(rules[0]));
+      setAssignCost(String(rules[0].unitCost));
+    } else {
+      setSelectedVariantId("");
+      setSkuInputValue("");
+      setAssignCost("10.0");
+    }
     setVisibleSkuCount(50);
-    setAssignCost(String(CATALOG_VARIANTS[0].defaultCost));
     setAssignPackSize("12");
     setAssignMoq("24");
     setSkuModalOpen(true);
@@ -952,10 +928,9 @@ export default function SuppliersPage() {
                         }}
                         autoComplete="off"
                         helpText={
-                          skuInputValue &&
-                          skuInputValue.trim().toLowerCase() !== getVariantLabel(selectedCatalogItem).toLowerCase()
-                            ? `Found ${filteredVariants.length} matching variant${filteredVariants.length === 1 ? "" : "s"}`
-                            : `Selected: ${selectedCatalogItem.title} (${selectedCatalogItem.sku}) • Default Cost: $${selectedCatalogItem.defaultCost.toFixed(2)}`
+                          selectedCatalogItem
+                            ? `Selected: ${selectedCatalogItem.title} (${selectedCatalogItem.sku || "No SKU"}) • Unit Cost: $${selectedCatalogItem.unitCost.toFixed(2)}`
+                            : "Search and select a product to assign to this supplier"
                         }
                       />
                     }
@@ -1012,7 +987,7 @@ export default function SuppliersPage() {
 
                                     <div className="clearstock-sku-badges">
                                       <span className="clearstock-sku-cost">
-                                        ${item.defaultCost.toFixed(2)}
+                                        ${item.unitCost.toFixed(2)}
                                       </span>
                                       {isAlreadyLinked && (
                                         <span className="clearstock-sku-tag-linked">Linked</span>

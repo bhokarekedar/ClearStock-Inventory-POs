@@ -40,8 +40,6 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
-import { getCatalogItem } from "../catalog";
-
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -116,8 +114,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // 6. Map PostgreSQL records to ReplenishmentItem entities
   const items: ReplenishmentItem[] = rulesDb.map((rule) => {
-    const catalog = getCatalogItem(rule.variantId);
-
     const variantSales = salesDb.filter((s) => s.variantId === rule.variantId);
     const unitsSold7d = variantSales
       .filter((s) => new Date(s.date) >= date7dAgo)
@@ -142,18 +138,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .filter((p) => p.variantId === rule.variantId)
       .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
 
-    // Dynamic stock-on-hand = initial catalog baseline + dock receipts
+    // Dynamic stock-on-hand = live rule availableStock + dock receipts
     const totalReceived = receivedByVariant[rule.variantId] || 0;
-    const stockOnHand = catalog.baseStockOnHand + totalReceived;
+    const stockOnHand = (rule.availableStock || 0) + totalReceived;
 
     return {
       id: rule.id,
       variantId: rule.variantId,
       inventoryItemId: rule.inventoryItemId || "",
-      title: catalog.title,
-      variantTitle: catalog.variantTitle,
-      sku: catalog.sku,
-      imageUrl: catalog.imageUrl,
+      title: rule.title || "Untitled Product",
+      variantTitle: rule.variantTitle || "",
+      sku: rule.supplierSku || "",
+      imageUrl: rule.imageUrl || "",
       supplierId: rule.supplierId,
       supplierName: rule.supplier.name,
       stockOnHand,
@@ -169,20 +165,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       minOrderQty: rule.minOrderQty,
       packSize: rule.packSize,
       unitCost: Number(rule.unitCost),
-      lastSyncDate: "Synced with PostgreSQL",
+      lastSyncDate: "Synced with Shopify",
     };
   });
 
   const appSettings = await (prisma as any).appSettings.findFirst({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
-    },
+    where: { shop },
   });
 
   const defaultLookbackWindow = appSettings?.defaultLookbackWindow ? String(appSettings.defaultLookbackWindow) : "30";
 
   return {
-    items: items.length > 0 ? items : MOCK_ITEMS,
+    items,
     suppliers: suppliersDb.map((s) => ({ id: s.id, name: s.name })),
     defaultLookbackWindow: (defaultLookbackWindow === "7" || defaultLookbackWindow === "14" || defaultLookbackWindow === "90" ? defaultLookbackWindow : "30") as "7" | "14" | "30" | "90",
   };
@@ -217,190 +211,6 @@ export interface ReplenishmentItem {
   lastSyncDate: string;
 }
 
-const MOCK_ITEMS: ReplenishmentItem[] = [
-  {
-    id: "item-1",
-    variantId: "gid://shopify/ProductVariant/44129481923",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841291",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Vintage Black / Large",
-    sku: "HDY-BLK-L",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    supplierId: "sup-apex",
-    supplierName: "Apex Apparel Ltd.",
-    stockOnHand: 32,
-    stockOnOrder: 0,
-    ads7d: 9.4,
-    ads14d: 8.8,
-    ads30d: 8.5,
-    ads90d: 7.9,
-    unitsSold30d: 255,
-    leadTimeDays: 14,
-    safetyStockDays: 7,
-    safetyStockMinimum: 20,
-    minOrderQty: 50,
-    packSize: 24, // Master box of 24
-    unitCost: 18.5,
-    lastSyncDate: "Today at 02:15 PM",
-  },
-  {
-    id: "item-2",
-    variantId: "gid://shopify/ProductVariant/44129481924",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841292",
-    title: "Organic Cotton Ribbed Beanie",
-    variantTitle: "Olive Green / One Size",
-    sku: "BN-OLV-OS",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-    supplierId: "sup-nordic",
-    supplierName: "Nordic Craft Co.",
-    stockOnHand: 18,
-    stockOnOrder: 0,
-    ads7d: 2.1,
-    ads14d: 2.0,
-    ads30d: 2.0,
-    ads90d: 1.8,
-    unitsSold30d: 60,
-    leadTimeDays: 21,
-    safetyStockDays: 10,
-    safetyStockMinimum: 15,
-    minOrderQty: 100, // MOQ forces recommendation up
-    packSize: 20,
-    unitCost: 6.2,
-    lastSyncDate: "Today at 02:15 PM",
-  },
-  {
-    id: "item-3",
-    variantId: "gid://shopify/ProductVariant/44129481925",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841293",
-    title: "Canvas Chore Jacket",
-    variantTitle: "Caramel Tan / XL",
-    sku: "JKT-CRM-XL",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-2_small.png",
-    supplierId: "sup-summit",
-    supplierName: "Summit Goods",
-    stockOnHand: 8,
-    stockOnOrder: 0,
-    ads7d: 12.0,
-    ads14d: 11.5,
-    ads30d: 11.0,
-    ads90d: 9.6,
-    unitsSold30d: 330,
-    leadTimeDays: 28,
-    safetyStockDays: 14,
-    safetyStockMinimum: 40,
-    minOrderQty: 50,
-    packSize: 10,
-    unitCost: 34.0,
-    lastSyncDate: "Today at 02:15 PM",
-  },
-  {
-    id: "item-4",
-    variantId: "gid://shopify/ProductVariant/44129481926",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841294",
-    title: "Thermal Waffle Crewneck",
-    variantTitle: "Heather Grey / Medium",
-    sku: "WFL-GRY-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-3_small.png",
-    supplierId: "sup-apex",
-    supplierName: "Apex Apparel Ltd.",
-    stockOnHand: 14,
-    stockOnOrder: 50, // Incoming PO arriving soon (Prevents Double-Ordering!)
-    ads7d: 4.5,
-    ads14d: 4.0,
-    ads30d: 4.2,
-    ads90d: 3.8,
-    unitsSold30d: 126,
-    leadTimeDays: 14,
-    safetyStockDays: 7,
-    safetyStockMinimum: 15,
-    minOrderQty: 25,
-    packSize: 12,
-    unitCost: 14.0,
-    lastSyncDate: "Today at 02:15 PM",
-  },
-  {
-    id: "item-5",
-    variantId: "gid://shopify/ProductVariant/44129481927",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841295",
-    title: "Heavyweight Boxy Hoodie",
-    variantTitle: "Off-White / Medium",
-    sku: "HDY-WHT-M",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-lifestyle-1_small.png",
-    supplierId: "sup-apex",
-    supplierName: "Apex Apparel Ltd.",
-    stockOnHand: 140,
-    stockOnOrder: 0,
-    ads7d: 3.6,
-    ads14d: 3.4,
-    ads30d: 3.5,
-    ads90d: 3.2,
-    unitsSold30d: 105,
-    leadTimeDays: 14,
-    safetyStockDays: 7,
-    safetyStockMinimum: 20,
-    minOrderQty: 50,
-    packSize: 24,
-    unitCost: 18.5,
-    lastSyncDate: "Today at 02:15 PM",
-  },
-  {
-    id: "item-6",
-    variantId: "gid://shopify/ProductVariant/44129481928",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841296",
-    title: "French Terry Sweatpants",
-    variantTitle: "Sage Green / Small",
-    sku: "SWP-SGE-S",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-1_small.png",
-    supplierId: "sup-apex",
-    supplierName: "Apex Apparel Ltd.",
-    stockOnHand: 520, // Overstocked example: $11,440.00 dead cash
-    stockOnOrder: 0,
-    ads7d: 0.9,
-    ads14d: 1.0,
-    ads30d: 1.0,
-    ads90d: 1.2,
-    unitsSold30d: 30,
-    leadTimeDays: 14,
-    safetyStockDays: 7,
-    safetyStockMinimum: 15,
-    minOrderQty: 50,
-    packSize: 20,
-    unitCost: 22.0,
-    lastSyncDate: "Today at 02:15 PM",
-  },
-  {
-    id: "item-7",
-    variantId: "gid://shopify/ProductVariant/44129481929",
-    inventoryItemId: "gid://shopify/InventoryItem/48192841297",
-    title: "Chunky Knit Scarf",
-    variantTitle: "Charcoal / One Size",
-    sku: "SCF-CHR-OS",
-    imageUrl:
-      "https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-collection-2_small.png",
-    supplierId: "sup-nordic",
-    supplierName: "Nordic Craft Co.",
-    stockOnHand: 220, // Overstocked example: $3,080.00 dead cash
-    stockOnOrder: 0,
-    ads7d: 0.4,
-    ads14d: 0.5,
-    ads30d: 0.5,
-    ads90d: 0.6,
-    unitsSold30d: 15,
-    leadTimeDays: 21,
-    safetyStockDays: 10,
-    safetyStockMinimum: 10,
-    minOrderQty: 50,
-    packSize: 25,
-    unitCost: 14.0,
-    lastSyncDate: "Today at 02:15 PM",
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Pure Deterministic Replenishment Math Helper
@@ -495,7 +305,7 @@ export default function ReplenishmentDashboard() {
   const navigate = useNavigate();
   const loaderData = useLoaderData<typeof loader>();
 
-  const items = loaderData?.items && loaderData.items.length > 0 ? loaderData.items : MOCK_ITEMS;
+  const items = loaderData?.items || [];
   const suppliers = loaderData?.suppliers || [];
 
   // Filters & Controls
@@ -584,7 +394,7 @@ export default function ReplenishmentDashboard() {
       (sum, r) => sum + r.calc.estimatedCost,
       0,
     );
-    // Locked Capital (Dead Cash) in items exceeding 90 days runway: ($11,440.00 + $3,080.00 = $14,520.00 ≈ $14,500.00)
+    // Locked Capital (Dead Cash) in items exceeding 90 days runway:
     const lockedCapital = calculatedRows
       .filter((r) => r.calc.isOverstocked)
       .reduce((sum, r) => sum + r.calc.deadCashValue, 0);
@@ -593,7 +403,7 @@ export default function ReplenishmentDashboard() {
       reorderCount: itemsNeedingReorder.length,
       totalUnitsToOrder,
       totalEstimatedSpend,
-      lockedCapital: lockedCapital > 0 ? lockedCapital : 14500.0,
+      lockedCapital: lockedCapital || 0,
     };
   }, [calculatedRows]);
 
@@ -602,12 +412,6 @@ export default function ReplenishmentDashboard() {
     const list = [{ label: "All Suppliers", value: "all" }];
     if (suppliers.length > 0) {
       suppliers.forEach((s) => list.push({ label: s.name, value: s.id }));
-    } else {
-      list.push(
-        { label: "Apex Apparel Ltd.", value: "sup-apex" },
-        { label: "Nordic Craft Co.", value: "sup-nordic" },
-        { label: "Summit Goods", value: "sup-summit" }
-      );
     }
     return list;
   }, [suppliers]);

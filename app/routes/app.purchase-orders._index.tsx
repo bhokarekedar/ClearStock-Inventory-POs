@@ -34,21 +34,6 @@ export interface POListingItem {
   createdAt: string;
 }
 
-const MOCK_POS: POListingItem[] = [
-  {
-    id: "po-1001",
-    poNumber: "PO-1001",
-    supplier: "Apex Apparel Ltd.",
-    status: "Ordered",
-    badgeTone: "info",
-    itemsCount: 1,
-    totalUnits: 50,
-    totalCost: 700.0,
-    expectedArrival: "In 3 days",
-    createdAt: "Today",
-  },
-];
-
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
@@ -77,23 +62,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // 1. Fetch Suppliers for the shop
   const suppliersDb = await prisma.supplier.findMany({
-    where: {
-      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
-    },
+    where: { shop },
     orderBy: { name: "asc" },
   });
 
-  const suppliers =
-    suppliersDb.length > 0
-      ? suppliersDb.map((s) => ({ label: s.name, value: s.id }))
-      : [
-          { label: "Apex Apparel Ltd.", value: "sup-apex" },
-          { label: "Nordic Craft Co.", value: "sup-nordic" },
-          { label: "Summit Essentials", value: "sup-summit" },
-        ];
+  const suppliers = suppliersDb.map((s) => ({ label: s.name, value: s.id }));
 
   // 2. Fetch Purchase Orders from PostgreSQL
   const posDb = await prisma.purchaseOrder.findMany({
+    where: { shop },
     include: {
       supplier: true,
       items: true,
@@ -161,7 +138,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
 
   return {
-    orders: orders.length > 0 ? orders : MOCK_POS,
+    orders,
     suppliers,
   };
 };
@@ -174,7 +151,7 @@ export default function PurchaseOrdersPage() {
   const submit = useSubmit();
   const actionData = useActionData<typeof action>();
 
-  const orders = loaderData?.orders || MOCK_POS;
+  const orders = loaderData?.orders || [];
   const suppliers = loaderData?.suppliers || [];
   const issuedPo = searchParams.get("issued");
   const draftPo = searchParams.get("draft");
