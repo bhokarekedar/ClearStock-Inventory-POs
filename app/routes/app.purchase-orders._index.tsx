@@ -12,7 +12,6 @@ import {
   InlineStack,
   BlockStack,
   EmptyState,
-  Banner,
   Modal,
   Tooltip,
   Select,
@@ -196,34 +195,37 @@ export default function PurchaseOrdersPage() {
   }, [suppliers, chosenSupplierId]);
 
   useEffect(() => {
+    let message = "";
     if (issuedPo) {
-      shopify.toast.show(`Purchase Order ${issuedPo} issued! Marked as Ordered (In-Transit).`);
+      message = `Purchase Order ${issuedPo} issued! Marked as Ordered (In-Transit).`;
     } else if (draftPo) {
-      shopify.toast.show(`Purchase Order ${draftPo} saved as Draft.`);
+      message = `Purchase Order ${draftPo} saved as Draft.`;
     } else if (deletedParam) {
-      shopify.toast.show(`Draft Purchase Order ${deletedParam} deleted.`);
+      message = `Draft Purchase Order ${deletedParam} deleted.`;
     } else if (receivedParam) {
-      shopify.toast.show(`Stock received for ${receivedParam}! Committed to Shopify inventory.`);
+      message = `Stock received for ${receivedParam}! Committed to Shopify inventory.`;
     } else if (partialParam) {
-      shopify.toast.show(`Partial delivery received for ${partialParam}! Remaining units on order.`);
+      message = `Partial delivery received for ${partialParam}! Remaining units on order.`;
     }
-  }, [issuedPo, draftPo, deletedParam, receivedParam, partialParam, shopify]);
+
+    if (message) {
+      shopify.toast.show(message);
+      // Clean up query params from URL so it doesn't linger
+      const next = new URLSearchParams(searchParams);
+      next.delete("issued");
+      next.delete("draft");
+      next.delete("deleted");
+      next.delete("received");
+      next.delete("partial");
+      setSearchParams(next, { replace: true });
+    }
+  }, [issuedPo, draftPo, deletedParam, receivedParam, partialParam, shopify, searchParams, setSearchParams]);
 
   useEffect(() => {
     if (actionData?.deletedPo) {
       shopify.toast.show(`Draft Purchase Order ${actionData.deletedPo} deleted.`);
     }
   }, [actionData, shopify]);
-
-  const handleDismissBanner = () => {
-    const next = new URLSearchParams(searchParams);
-    next.delete("issued");
-    next.delete("draft");
-    next.delete("deleted");
-    next.delete("received");
-    next.delete("partial");
-    setSearchParams(next);
-  };
 
   return (
     <Page
@@ -236,53 +238,6 @@ export default function PurchaseOrdersPage() {
       }}
     >
       <BlockStack gap="400">
-        {receivedParam && (
-          <Banner
-            title={`Stock Received for ${receivedParam}`}
-            tone="success"
-            onDismiss={handleDismissBanner}
-          >
-            <Text as="p" variant="bodyMd">
-              The shipment for <strong>{receivedParam}</strong> was verified and committed into your Shopify available inventory. The purchase order is now marked as <strong>Received (Closed)</strong>.
-            </Text>
-          </Banner>
-        )}
-
-        {partialParam && (
-          <Banner
-            title={`Partial Delivery Received for ${partialParam}`}
-            tone="warning"
-            onDismiss={handleDismissBanner}
-          >
-            <Text as="p" variant="bodyMd">
-              The partial delivery for <strong>{partialParam}</strong> has been added to your inventory. The order remains active as <strong>Partially Received</strong> awaiting the remaining units from the vendor.
-            </Text>
-          </Banner>
-        )}
-
-        {issuedPo && (
-          <Banner
-            title={`Purchase Order ${issuedPo} Issued Successfully`}
-            tone="success"
-            onDismiss={handleDismissBanner}
-          >
-            <Text as="p" variant="bodyMd">
-              The order has been officially recorded as <strong>Ordered (In-Transit)</strong>. Incoming inventory has been added to your Replenishment dashboard. When the physical shipment arrives at your dock, click <strong>&ldquo;Receive Stock&rdquo;</strong> in the table below.
-            </Text>
-          </Banner>
-        )}
-
-        {draftPo && (
-          <Banner
-            title={`Purchase Order ${draftPo} Saved as Draft`}
-            tone="info"
-            onDismiss={handleDismissBanner}
-          >
-            <Text as="p" variant="bodyMd">
-              This purchase order is saved as a draft. Click <strong>&ldquo;View / Edit&rdquo;</strong> below whenever you are ready to review and issue the order to your supplier.
-            </Text>
-          </Banner>
-        )}
 
         <div className="clearstock-po-table">
           <Card padding="0">
