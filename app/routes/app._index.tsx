@@ -88,27 +88,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
   const openPoItems = openPurchaseOrders.flatMap((po) => po.items);
 
-  // Fetch all received quantities across ALL non-cancelled purchase orders (Dock Receiving Loop)
-  const allReceivedItems = await prisma.purchaseOrderItem.findMany({
-    where: {
-      purchaseOrder: {
-        shop,
-        status: { not: "CANCELLED" },
-      },
-      quantityReceived: { gt: 0 },
-    },
-    select: {
-      variantId: true,
-      quantityReceived: true,
-    },
-  });
-
-  const receivedByVariant: Record<string, number> = {};
-  for (const item of allReceivedItems) {
-    receivedByVariant[item.variantId] =
-      (receivedByVariant[item.variantId] || 0) + item.quantityReceived;
-  }
-
   // 6. Map PostgreSQL records to ReplenishmentItem entities
   const items: ReplenishmentItem[] = rulesDb.map((rule) => {
     const variantSales = salesDb.filter((s) => s.variantId === rule.variantId);
@@ -135,9 +114,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .filter((p) => p.variantId === rule.variantId)
       .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
 
-    // Dynamic stock-on-hand = live rule availableStock + dock receipts
-    const totalReceived = receivedByVariant[rule.variantId] || 0;
-    const stockOnHand = (rule.availableStock || 0) + totalReceived;
+    // Live stock-on-hand from Shopify
+    const stockOnHand = rule.availableStock || 0;
 
     return {
       id: rule.id,
@@ -261,12 +239,12 @@ export function computeReplenishmentMath(
   let statusTone: "critical" | "warning" | "info" | "success" = "success";
   let statusLabel: "Reorder Now" | "Overstocked" | "Incoming" | "Stock OK" = "Stock OK";
 
-  if (item.stockOnOrder > 0 && item.stockOnHand <= Math.max(15, ads * 5)) {
-    statusTone = "info";
-    statusLabel = "Incoming";
-  } else if (recommendedUnits > 0 || (item.stockOnHand + item.stockOnOrder) < reorderPoint) {
+  if (recommendedUnits > 0 || (item.stockOnHand + item.stockOnOrder) < reorderPoint) {
     statusTone = "critical";
     statusLabel = "Reorder Now";
+  } else if (item.stockOnOrder > 0 && item.stockOnHand < reorderPoint) {
+    statusTone = "info";
+    statusLabel = "Incoming";
   } else if (isOverstocked) {
     statusTone = "warning";
     statusLabel = "Overstocked";

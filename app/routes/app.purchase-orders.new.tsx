@@ -111,26 +111,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
   const openPoItems = openPurchaseOrders.flatMap((po) => po.items);
 
-  const allReceivedItems = await prisma.purchaseOrderItem.findMany({
-    where: {
-      purchaseOrder: {
-        shop,
-        status: { not: "CANCELLED" },
-      },
-      quantityReceived: { gt: 0 },
-    },
-    select: {
-      variantId: true,
-      quantityReceived: true,
-    },
-  });
-
-  const receivedByVariant: Record<string, number> = {};
-  for (const item of allReceivedItems) {
-    receivedByVariant[item.variantId] =
-      (receivedByVariant[item.variantId] || 0) + item.quantityReceived;
-  }
-
   function getRuleRecommendedQty(r: (typeof allRulesDb)[0]): { recommendedQty: number; deficit: number } {
     const variantSales = salesDb.filter((s) => s.variantId === r.variantId);
     const unitsSold30d = variantSales.reduce((sum: number, s) => sum + s.unitsSold, 0);
@@ -143,8 +123,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const stockOnOrder = openPoItems
       .filter((p) => p.variantId === r.variantId)
       .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
-    const totalReceived = receivedByVariant[r.variantId] || 0;
-    const stockOnHand = (r.availableStock || 0) + totalReceived;
+    const stockOnHand = r.availableStock || 0;
 
     const rawDeficit = Math.max(0, reorderPoint - stockOnHand - stockOnOrder);
     if (rawDeficit > 0) {
