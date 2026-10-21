@@ -183,18 +183,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const locResponse = await admin.graphql(`
         #graphql
         query GetStorePrimaryLocation {
-          locations(first: 1) {
-            edges {
-              node {
-                id
-                name
-              }
+          locations(first: 10) {
+            nodes {
+              id
+              name
+              isPrimary
+              isActive
             }
           }
         }
       `);
       const locData = await locResponse.json();
-      const primaryLocationId = locData.data?.locations?.edges?.[0]?.node?.id;
+      const locationsList = locData.data?.locations?.nodes || [];
+      const primaryLocation = locationsList.find((l: any) => l.isPrimary && l.isActive) || locationsList.find((l: any) => l.isActive);
+      const primaryLocationId = primaryLocation?.id;
 
       if (primaryLocationId) {
         const changes: Array<{ inventoryItemId: string; locationId: string; delta: number }> = [];
@@ -237,6 +239,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   field
                   message
                 }
+                inventoryAdjustmentGroup {
+                  createdAt
+                  reason
+                }
               }
             }`,
             {
@@ -251,14 +257,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           );
           const adjData = await adjResponse.json();
           if (adjData.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
-            console.log("[Shopify Inventory Sync Notice]", adjData.data.inventoryAdjustQuantities.userErrors[0].message);
+            console.error("[Shopify Inventory Sync Error]", adjData.data.inventoryAdjustQuantities.userErrors);
           } else {
             liveSyncStatus = " • Synced to Shopify available inventory";
+            console.log(`[Shopify Live Sync] Successfully adjusted ${changes.length} items at primary location ${primaryLocation.name} (${primaryLocationId})`);
           }
         }
       }
-    } catch {
-      console.log("[Shopify Live Sync] Dock receipt recorded in database. Storefront live sync skipped (offline mode).");
+    } catch (err: any) {
+      console.error("[Shopify Live Sync Error]", err);
     }
 
     const paramKey = newStatus === "RECEIVED" ? "received" : "partial";
@@ -835,8 +842,8 @@ export default function PurchaseOrderDetailsAndReceiving() {
                     : [
                         { title: "Product & Variant" },
                         { title: "Unit Cost" },
-                        { title: "Ordered" },
-                        { title: isReceived ? "Received" : "Actual Received" },
+                        { title: "Ordered (Units)" },
+                        { title: isReceived ? "Received (Units)" : "Actual Received (Units)" },
                         { title: "Variance" },
                         { title: "Subtotal", alignment: "end" },
                       ]
@@ -956,11 +963,12 @@ export default function PurchaseOrderDetailsAndReceiving() {
                             {isDraft ? `${item.orderedQty} units` : `${item.receivedQty} units`}
                           </Text>
                         ) : (
-                          <div style={{ width: "90px" }}>
+                          <div style={{ width: "120px" }}>
                             <TextField
                               label="Received Qty"
                               labelHidden
                               type="number"
+                              suffix="units"
                               value={String(item.receivedQty)}
                               onChange={(val) => handleReceivedQtyChange(item.id, val)}
                               autoComplete="off"

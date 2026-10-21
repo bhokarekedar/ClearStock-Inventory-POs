@@ -575,8 +575,8 @@ export default function PurchaseOrderDraftEditor() {
                 headings={[
                   { title: "Product & SKU" },
                   { title: "Unit Cost" },
-                  { title: "Order Qty" },
-                  { title: "Cases & Total", alignment: "end" },
+                  { title: "Order Qty (Units)" },
+                  { title: "Boxes & Total", alignment: "end" },
                   { title: "", alignment: "end" },
                 ]}
               >
@@ -626,28 +626,30 @@ export default function PurchaseOrderDraftEditor() {
 
                       {/* Order Quantity Input */}
                       <IndexTable.Cell>
-                        <div style={{ width: "95px" }}>
+                        <div style={{ width: "120px" }}>
                           <TextField
                             label="Order Qty"
                             labelHidden
                             type="number"
+                            suffix="units"
                             value={String(item.orderQuantity)}
                             onChange={(val) => handleQuantityChange(item.id, val)}
                             autoComplete="off"
                             autoSize
+                            helpText={`${lineCases} ${lineCases === 1 ? "box" : "boxes"} (${item.packSize}/box)`}
                           />
                         </div>
                       </IndexTable.Cell>
 
                       {/* Cases & Line Total */}
                       <IndexTable.Cell>
-                        <div style={{ minWidth: "110px", textAlign: "right" }}>
+                        <div style={{ minWidth: "120px", textAlign: "right" }}>
                           <BlockStack gap="025" inlineAlign="end">
                             <Text as="span" variant="bodySm" fontWeight="bold">
                               ${lineSubtotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </Text>
                             <Text as="span" variant="bodyXs" tone="subdued">
-                              {lineCases} {lineCases === 1 ? "case" : "cases"}
+                              {lineCases} {lineCases === 1 ? "box" : "boxes"} ({item.orderQuantity} units)
                             </Text>
                           </BlockStack>
                         </div>
