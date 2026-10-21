@@ -1,5 +1,6 @@
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useNavigate, useRouteError, useLoaderData } from "react-router";
+import { useState, useEffect } from "react";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useNavigate, useRouteError, useLoaderData, useSearchParams, useSubmit, useActionData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   Page,
@@ -11,8 +12,13 @@ import {
   InlineStack,
   BlockStack,
   EmptyState,
+  Banner,
+  Modal,
+  Tooltip,
+  Select,
 } from "@shopify/polaris";
-import { PlusIcon } from "@shopify/polaris-icons";
+import { PlusIcon, DeleteIcon } from "@shopify/polaris-icons";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
@@ -44,11 +50,50 @@ const MOCK_POS: POListingItem[] = [
   },
 ];
 
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const formData = await request.formData();
+  const intent = String(formData.get("intent"));
+  const poId = String(formData.get("poId"));
+
+  if (intent === "DELETE_DRAFT") {
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: poId },
+    });
+    if (po && po.status === "DRAFT") {
+      await prisma.purchaseOrder.delete({
+        where: { id: poId },
+      });
+      return { ok: true, deletedPo: po.poNumber };
+    }
+    return { ok: false, error: "Only draft purchase orders can be deleted." };
+  }
+
+  return { ok: false };
+};
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  // 1. Fetch Purchase Orders from PostgreSQL
+  // 1. Fetch Suppliers for the shop
+  const suppliersDb = await prisma.supplier.findMany({
+    where: {
+      OR: [{ shop }, { shop: "quickstart-demo.myshopify.com" }, { shop: "test-store-pzq1asjy.myshopify.com" }],
+    },
+    orderBy: { name: "asc" },
+  });
+
+  const suppliers =
+    suppliersDb.length > 0
+      ? suppliersDb.map((s) => ({ label: s.name, value: s.id }))
+      : [
+          { label: "Apex Apparel Ltd.", value: "sup-apex" },
+          { label: "Nordic Craft Co.", value: "sup-nordic" },
+          { label: "Summit Essentials", value: "sup-summit" },
+        ];
+
+  // 2. Fetch Purchase Orders from PostgreSQL
   const posDb = await prisma.purchaseOrder.findMany({
     include: {
       supplier: true,
@@ -118,13 +163,67 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     orders: orders.length > 0 ? orders : MOCK_POS,
+    suppliers,
   };
 };
 
 export default function PurchaseOrdersPage() {
   const navigate = useNavigate();
   const loaderData = useLoaderData<typeof loader>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const shopify = useAppBridge();
+  const submit = useSubmit();
+  const actionData = useActionData<typeof action>();
+
   const orders = loaderData?.orders || MOCK_POS;
+  const suppliers = loaderData?.suppliers || [];
+  const issuedPo = searchParams.get("issued");
+  const draftPo = searchParams.get("draft");
+  const deletedParam = searchParams.get("deleted");
+  const receivedParam = searchParams.get("received");
+  const partialParam = searchParams.get("partial");
+
+  const [pendingDeletePo, setPendingDeletePo] = useState<POListingItem | null>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [chosenSupplierId, setChosenSupplierId] = useState<string>(
+    suppliers[0]?.value || "",
+  );
+
+  useEffect(() => {
+    if (!chosenSupplierId && suppliers.length > 0) {
+      setChosenSupplierId(suppliers[0].value);
+    }
+  }, [suppliers, chosenSupplierId]);
+
+  useEffect(() => {
+    if (issuedPo) {
+      shopify.toast.show(`Purchase Order ${issuedPo} issued! Marked as Ordered (In-Transit).`);
+    } else if (draftPo) {
+      shopify.toast.show(`Purchase Order ${draftPo} saved as Draft.`);
+    } else if (deletedParam) {
+      shopify.toast.show(`Draft Purchase Order ${deletedParam} deleted.`);
+    } else if (receivedParam) {
+      shopify.toast.show(`Stock received for ${receivedParam}! Committed to Shopify inventory.`);
+    } else if (partialParam) {
+      shopify.toast.show(`Partial delivery received for ${partialParam}! Remaining units on order.`);
+    }
+  }, [issuedPo, draftPo, deletedParam, receivedParam, partialParam, shopify]);
+
+  useEffect(() => {
+    if (actionData?.deletedPo) {
+      shopify.toast.show(`Draft Purchase Order ${actionData.deletedPo} deleted.`);
+    }
+  }, [actionData, shopify]);
+
+  const handleDismissBanner = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("issued");
+    next.delete("draft");
+    next.delete("deleted");
+    next.delete("received");
+    next.delete("partial");
+    setSearchParams(next);
+  };
 
   return (
     <Page
@@ -133,10 +232,58 @@ export default function PurchaseOrdersPage() {
       primaryAction={{
         content: "Create Purchase Order",
         icon: PlusIcon,
-        onAction: () => navigate("/app/purchase-orders/new"),
+        onAction: () => setIsCreateModalOpen(true),
       }}
     >
       <BlockStack gap="400">
+        {receivedParam && (
+          <Banner
+            title={`Stock Received for ${receivedParam}`}
+            tone="success"
+            onDismiss={handleDismissBanner}
+          >
+            <Text as="p" variant="bodyMd">
+              The shipment for <strong>{receivedParam}</strong> was verified and committed into your Shopify available inventory. The purchase order is now marked as <strong>Received (Closed)</strong>.
+            </Text>
+          </Banner>
+        )}
+
+        {partialParam && (
+          <Banner
+            title={`Partial Delivery Received for ${partialParam}`}
+            tone="warning"
+            onDismiss={handleDismissBanner}
+          >
+            <Text as="p" variant="bodyMd">
+              The partial delivery for <strong>{partialParam}</strong> has been added to your inventory. The order remains active as <strong>Partially Received</strong> awaiting the remaining units from the vendor.
+            </Text>
+          </Banner>
+        )}
+
+        {issuedPo && (
+          <Banner
+            title={`Purchase Order ${issuedPo} Issued Successfully`}
+            tone="success"
+            onDismiss={handleDismissBanner}
+          >
+            <Text as="p" variant="bodyMd">
+              The order has been officially recorded as <strong>Ordered (In-Transit)</strong>. Incoming inventory has been added to your Replenishment dashboard. When the physical shipment arrives at your dock, click <strong>&ldquo;Receive Stock&rdquo;</strong> in the table below.
+            </Text>
+          </Banner>
+        )}
+
+        {draftPo && (
+          <Banner
+            title={`Purchase Order ${draftPo} Saved as Draft`}
+            tone="info"
+            onDismiss={handleDismissBanner}
+          >
+            <Text as="p" variant="bodyMd">
+              This purchase order is saved as a draft. Click <strong>&ldquo;View / Edit&rdquo;</strong> below whenever you are ready to review and issue the order to your supplier.
+            </Text>
+          </Banner>
+        )}
+
         <div className="clearstock-po-table">
           <Card padding="0">
             <IndexTable
@@ -157,9 +304,12 @@ export default function PurchaseOrdersPage() {
                 <IndexTable.Row id={po.id} key={po.id} position={index}>
                   <IndexTable.Cell>
                     <div style={{ minWidth: "130px" }}>
-                      <Text as="span" variant="bodyMd" fontWeight="semibold">
+                      <Button
+                        variant="monochromePlain"
+                        onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}
+                      >
                         {po.poNumber}
-                      </Text>
+                      </Button>
                     </div>
                   </IndexTable.Cell>
 
@@ -202,20 +352,39 @@ export default function PurchaseOrdersPage() {
                   </IndexTable.Cell>
 
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "140px", textAlign: "right" }}>
-                      <InlineStack gap="100" align="end">
+                    <div style={{ minWidth: "200px", textAlign: "right" }}>
+                      <InlineStack gap="150" align="end" blockAlign="center">
                         {po.status === "Draft" ? (
-                          <Button size="slim" onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}>
-                            View / Edit
-                          </Button>
+                          <>
+                            <Button size="slim" onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}>
+                              View / Edit
+                            </Button>
+                            <Tooltip content="Delete Draft">
+                              <Button
+                                icon={DeleteIcon}
+                                tone="critical"
+                                variant="plain"
+                                accessibilityLabel={`Delete draft ${po.poNumber}`}
+                                onClick={() => setPendingDeletePo(po)}
+                              />
+                            </Tooltip>
+                          </>
                         ) : po.status === "Ordered" || po.status === "Partially Received" ? (
-                          <Button
-                            variant="primary"
-                            size="slim"
-                            onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}
-                          >
-                            Receive Stock
-                          </Button>
+                          <>
+                            <Button
+                              size="slim"
+                              onClick={() => navigate(`/app/purchase-orders/${po.poNumber}`)}
+                            >
+                              View
+                            </Button>
+                            <Button
+                              variant="primary"
+                              size="slim"
+                              onClick={() => navigate(`/app/purchase-orders/${po.poNumber}?mode=receive`)}
+                            >
+                              Receive Stock
+                            </Button>
+                          </>
                         ) : (
                           <Button
                             variant="plain"
@@ -234,6 +403,77 @@ export default function PurchaseOrdersPage() {
           </Card>
         </div>
       </BlockStack>
+
+      {/* Delete Draft Confirmation Modal */}
+      <Modal
+        open={Boolean(pendingDeletePo)}
+        onClose={() => setPendingDeletePo(null)}
+        title={`Delete Draft ${pendingDeletePo?.poNumber}?`}
+        primaryAction={{
+          content: "Delete Draft",
+          destructive: true,
+          onAction: () => {
+            if (!pendingDeletePo) return;
+            submit(
+              { intent: "DELETE_DRAFT", poId: pendingDeletePo.id },
+              { method: "post" },
+            );
+            setPendingDeletePo(null);
+          },
+        }}
+        secondaryActions={[
+          {
+            content: "Cancel",
+            onAction: () => setPendingDeletePo(null),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            <Text as="p" variant="bodyMd">
+              Are you sure you want to permanently delete draft purchase order <strong>{pendingDeletePo?.poNumber}</strong> for <strong>{pendingDeletePo?.supplier}</strong>?
+            </Text>
+            <Text as="p" variant="bodySm" tone="subdued">
+              This draft order was never sent to the vendor, and no inventory will be affected. This action cannot be undone.
+            </Text>
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
+
+      {/* Modal: Select Supplier to Create PO */}
+      <Modal
+        open={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        title="Create Purchase Order"
+        primaryAction={{
+          content: "Continue to Order Editor",
+          onAction: () => {
+            setIsCreateModalOpen(false);
+            navigate(`/app/purchase-orders/new?supplierId=${chosenSupplierId}`);
+          },
+          disabled: !chosenSupplierId,
+        }}
+        secondaryActions={[
+          {
+            content: "Cancel",
+            onAction: () => setIsCreateModalOpen(false),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="400">
+            <Text as="p" variant="bodyMd">
+              Select which supplier you want to order from. Once selected, your new purchase order will open cleanly so you can select exactly which products to include from that supplier.
+            </Text>
+            <Select
+              label="Select Supplier"
+              options={suppliers}
+              value={chosenSupplierId}
+              onChange={setChosenSupplierId}
+            />
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
     </Page>
   );
 }

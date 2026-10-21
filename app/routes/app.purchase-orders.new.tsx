@@ -64,6 +64,7 @@ export interface AvailableRuleItem {
   packSize: number;
   unitCost: number;
   minOrderQty: number;
+  recommendedQty: number;
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -72,6 +73,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const url = new URL(request.url);
   const itemsParam = url.searchParams.get("items");
+  const supplierParam = url.searchParams.get("supplierId");
   const selectedRuleIds = itemsParam ? itemsParam.split(",").filter(Boolean) : [];
 
   // 1. Fetch all suppliers for selection
@@ -91,8 +93,82 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     orderBy: { variantId: "asc" },
   });
 
+  // 2.5 Fetch 30-day sales, open incoming POs, and dock receipts for true mathematical replenishment
+  const now = new Date();
+  const date30dAgo = new Date(now);
+  date30dAgo.setDate(date30dAgo.getDate() - 30);
+
+  const salesDb = await prisma.dailySalesAggregator.findMany({
+    where: {
+      date: { gte: date30dAgo },
+    },
+  });
+
+  const openPurchaseOrders = await prisma.purchaseOrder.findMany({
+    where: {
+      status: { in: ["ORDERED", "PARTIALLY_RECEIVED"] },
+    },
+    include: {
+      items: true,
+    },
+  });
+  const openPoItems = openPurchaseOrders.flatMap((po) => po.items);
+
+  const allReceivedItems = await prisma.purchaseOrderItem.findMany({
+    where: {
+      purchaseOrder: {
+        status: { not: "CANCELLED" },
+      },
+      quantityReceived: { gt: 0 },
+    },
+    select: {
+      variantId: true,
+      quantityReceived: true,
+    },
+  });
+
+  const receivedByVariant: Record<string, number> = {};
+  for (const item of allReceivedItems) {
+    receivedByVariant[item.variantId] =
+      (receivedByVariant[item.variantId] || 0) + item.quantityReceived;
+  }
+
+  function getRuleRecommendedQty(r: (typeof allRulesDb)[0]): { recommendedQty: number; deficit: number } {
+    const catalog = getCatalogItem(r.variantId);
+    const variantSales = salesDb.filter((s) => s.variantId === r.variantId);
+    const unitsSold30d = variantSales.reduce((sum: number, s) => sum + s.unitsSold, 0);
+    const ads = Number((unitsSold30d / 30).toFixed(1));
+    const leadTime = r.leadTimeDays ?? r.supplier.defaultLeadTime;
+    const leadTimeDemand = ads * leadTime;
+    const safetyStock = Math.max(Math.round(ads * r.safetyStockDays), r.safetyStockMinimum);
+    const reorderPoint = Math.round(leadTimeDemand + safetyStock);
+
+    const stockOnOrder = openPoItems
+      .filter((p) => p.variantId === r.variantId)
+      .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
+    const totalReceived = receivedByVariant[r.variantId] || 0;
+    const stockOnHand = catalog.baseStockOnHand + totalReceived;
+
+    const rawDeficit = Math.max(0, reorderPoint - stockOnHand - stockOnOrder);
+    if (rawDeficit > 0) {
+      const minUnitsNeeded = Math.max(rawDeficit, r.minOrderQty);
+      const casesCount = Math.ceil(minUnitsNeeded / r.packSize);
+      return {
+        recommendedQty: casesCount * r.packSize,
+        deficit: rawDeficit,
+      };
+    }
+
+    const minCases = Math.ceil(Math.max(r.minOrderQty, r.packSize) / r.packSize);
+    return {
+      recommendedQty: minCases * r.packSize,
+      deficit: r.minOrderQty,
+    };
+  }
+
   const availableRules: AvailableRuleItem[] = allRulesDb.map((r) => {
     const catalog = getCatalogItem(r.variantId);
+    const { recommendedQty } = getRuleRecommendedQty(r);
     return {
       ruleId: r.id,
       variantId: r.variantId,
@@ -107,6 +183,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       packSize: r.packSize,
       unitCost: Number(r.unitCost),
       minOrderQty: r.minOrderQty,
+      recommendedQty,
     };
   });
 
@@ -114,36 +191,33 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const poCount = await prisma.purchaseOrder.count();
   const nextPoNumber = `PO-${1002 + poCount}`;
 
-  // 4. Fetch rules for selected items or fallback to top rules
+  // 4. Fetch rules for selected items (from Replenishment page)
   const selectedRules =
     selectedRuleIds.length > 0
       ? allRulesDb.filter((r) => selectedRuleIds.includes(r.id))
       : [];
 
-  // Group selected items by supplier to avoid cross-supplier contamination
-  let primarySupplier = suppliersDb[0] || {
-    id: "sup-apex",
-    name: "Apex Apparel Ltd.",
-    defaultLeadTime: 14,
-  };
+  // Determine primary supplier
+  let primarySupplier =
+    (supplierParam ? suppliersDb.find((s) => s.id === supplierParam) : null) ||
+    suppliersDb[0] || {
+      id: "sup-apex",
+      name: "Apex Apparel Ltd.",
+      defaultLeadTime: 14,
+    };
 
-  let initialRules = selectedRules;
+  let initialRules: typeof allRulesDb = [];
   if (selectedRules.length > 0) {
     // Pick the supplier of the first selected item as the primary supplier
     primarySupplier = selectedRules[0].supplier;
     // Filter initial rules so they strictly belong to the primary supplier
     initialRules = selectedRules.filter((r) => r.supplierId === primarySupplier.id);
-  } else if (allRulesDb.length > 0) {
-    // Default to first 3 rules of the primary supplier
-    initialRules = allRulesDb.filter((r) => r.supplierId === primarySupplier.id).slice(0, 3);
   }
 
-  // 5. Pre-calculate recommended case-pack quantities
+  // 5. Pre-calculate true recommended case-pack quantities
   const draftItems: DraftPOItem[] = initialRules.map((r) => {
     const catalog = getCatalogItem(r.variantId);
-    const deficit = Math.max(r.minOrderQty, 24);
-    const cases = Math.ceil(deficit / r.packSize);
-    const recommendedQty = cases * r.packSize;
+    const { recommendedQty, deficit } = getRuleRecommendedQty(r);
 
     return {
       id: r.id,
@@ -223,7 +297,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     },
   });
 
-  return redirect(`/app/purchase-orders/${po.poNumber}`);
+  return redirect(`/app/purchase-orders?${poStatus === "ORDERED" ? "issued" : "draft"}=${po.poNumber}`);
 };
 
 export default function PurchaseOrderDraftEditor() {
@@ -249,6 +323,9 @@ export default function PurchaseOrderDraftEditor() {
   // Line Item Picker Modal State
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [addSearchQuery, setAddSearchQuery] = useState("");
+
+  // Issue PO Confirmation Modal State
+  const [isIssueModalOpen, setIsIssueModalOpen] = useState(false);
 
   // Supplier Change Confirmation State
   const [pendingSupplierId, setPendingSupplierId] = useState<string | null>(null);
@@ -342,7 +419,7 @@ export default function PurchaseOrderDraftEditor() {
       return;
     }
 
-    const initialDeficit = Math.max(rule.minOrderQty, rule.packSize * 2);
+    const initialDeficit = rule.recommendedQty || Math.max(rule.minOrderQty, rule.packSize);
     const newItem: DraftPOItem = {
       id: rule.ruleId,
       variantId: rule.variantId,
@@ -459,7 +536,13 @@ export default function PurchaseOrderDraftEditor() {
         content: "Issue PO (Save & Mark Ordered)",
         icon: CheckIcon,
         loading: isSubmitting,
-        onAction: () => handleSaveDraft("ORDERED"),
+        onAction: () => {
+          if (items.length === 0) {
+            shopify.toast.show("Please add at least one line item before issuing the PO.", { isError: true });
+            return;
+          }
+          setIsIssueModalOpen(true);
+        },
       }}
       secondaryActions={[
         {
@@ -784,9 +867,10 @@ export default function PurchaseOrderDraftEditor() {
                         <Text as="p" variant="bodyXs" tone="subdued">
                           {rule.variantTitle} • SKU: {rule.sku}
                         </Text>
-                        <InlineStack gap="150">
+                        <InlineStack gap="150" blockAlign="center">
                           <Badge tone="info">{`Pack of ${rule.packSize}`}</Badge>
                           <Badge tone="new">{`MOQ: ${rule.minOrderQty}`}</Badge>
+                          <Badge tone="attention">{`Reorder: ${rule.recommendedQty} units`}</Badge>
                           <Text as="span" variant="bodyXs" tone="subdued">
                             Unit Cost: ${rule.unitCost.toFixed(2)}
                           </Text>
@@ -849,6 +933,64 @@ export default function PurchaseOrderDraftEditor() {
             </Banner>
             <Text as="p" variant="bodyMd">
               Switching to <strong>{loaderData.suppliers.find((s) => s.value === pendingSupplierId)?.label}</strong> will remove conflicting line items from your draft. Would you like to proceed?
+            </Text>
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
+
+      {/* Confirmation Modal: Issue PO and Mark Ordered */}
+      <Modal
+        open={isIssueModalOpen}
+        onClose={() => setIsIssueModalOpen(false)}
+        title={`Issue Purchase Order (${poNumber})?`}
+        primaryAction={{
+          content: "Confirm & Issue PO",
+          loading: isSubmitting,
+          onAction: () => {
+            setIsIssueModalOpen(false);
+            handleSaveDraft("ORDERED");
+          },
+        }}
+        secondaryActions={[
+          {
+            content: "Keep Editing",
+            onAction: () => setIsIssueModalOpen(false),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="400">
+            <Banner tone="info">
+              <Text as="p" variant="bodyMd">
+                Issuing this purchase order officially marks it as <strong>Ordered (In-Transit)</strong> and counts <strong>+{totals.totalUnits} units</strong> as incoming stock on your Replenishment dashboard.
+              </Text>
+            </Banner>
+
+            <Card padding="300" background="bg-surface-secondary">
+              <BlockStack gap="200">
+                <InlineStack align="space-between">
+                  <Text as="span" variant="bodySm" tone="subdued">Supplier:</Text>
+                  <Text as="span" variant="bodySm" fontWeight="bold">{supplierName}</Text>
+                </InlineStack>
+                <InlineStack align="space-between">
+                  <Text as="span" variant="bodySm" tone="subdued">Items to Order:</Text>
+                  <Text as="span" variant="bodySm" fontWeight="semibold">{items.length} SKUs ({totals.totalUnits} units)</Text>
+                </InlineStack>
+                <InlineStack align="space-between">
+                  <Text as="span" variant="bodySm" tone="subdued">Total Order Value:</Text>
+                  <Text as="span" variant="bodySm" fontWeight="bold">
+                    ${totals.totalCost.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </Text>
+                </InlineStack>
+                <InlineStack align="space-between">
+                  <Text as="span" variant="bodySm" tone="subdued">Expected Delivery Date:</Text>
+                  <Text as="span" variant="bodySm">{expectedArrival || "TBD"}</Text>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+
+            <Text as="p" variant="bodySm" tone="subdued">
+              After confirming, you will be taken to your <strong>Purchase Orders List</strong> where you can track this order. When goods physically arrive at your warehouse, click <strong>"Receive Stock"</strong> to verify delivery.
             </Text>
           </BlockStack>
         </Modal.Section>
