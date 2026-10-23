@@ -26,6 +26,7 @@ import {
   Tooltip,
   ProgressBar,
   Icon,
+  Tag,
   useIndexResourceState,
   type FilterInterface,
   type AppliedFilterInterface,
@@ -1124,6 +1125,14 @@ export default function ReplenishmentDashboard() {
     setCurrentPage(1);
   };
 
+  const isLookbackChanged =
+    rollingWindow !== (loaderData?.defaultLookbackWindow || "30");
+  const hasActiveFilters =
+    filterStatus !== "all" ||
+    selectedSupplier !== "all" ||
+    searchQuery.trim().length > 0 ||
+    isLookbackChanged;
+
   const handleHealData = () => {
     submit({ intent: "HEAL_DATA" }, { method: "post" });
   };
@@ -1909,53 +1918,9 @@ export default function ReplenishmentDashboard() {
       {/* ════════════════════════════════════════════════════════════ */}
       {viewMode === "dashboard" && (
         <BlockStack gap="500">
-          {/* Eye-Friendly Modern KPI Summary Cards (Synchronized 1:1 with Table Tabs) */}
-          <InlineGrid columns={{ xs: 1, sm: 2, md: 3, lg: 5 }} gap="300">
-            {/* Card 1: All Items (System Base - Cool Slate Gradient) */}
-            <div
-              className={`clearstock-kpi-card clearstock-kpi-card--catalog ${filterStatus === "all" ? "is-active" : ""}`}
-              onClick={() => setFilterStatus("all")}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setFilterStatus("all");
-                }
-              }}
-              aria-pressed={filterStatus === "all"}
-            >
-              <div className="clearstock-kpi-header">
-                <div className="clearstock-kpi-header-left">
-                  <div className="clearstock-kpi-icon-badge">
-                    <Icon source={ProductIcon} />
-                  </div>
-                  <span className="clearstock-kpi-title">All Items</span>
-                </div>
-                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
-                  {filterStatus === "all" ? (
-                    <span className="clearstock-kpi-active-pill">Filtered ✓</span>
-                  ) : (
-                    <Tooltip content="All catalog items: Total products configured with suppliers and replenishment rules across your store.">
-                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
-                        <Icon source={InfoIcon} tone="subdued" />
-                      </span>
-                    </Tooltip>
-                  )}
-                </div>
-              </div>
-              <div className="clearstock-kpi-value">
-                {summaryMetrics.activeSkusCount}
-              </div>
-              <div className="clearstock-kpi-footer">
-                <span>Across {suppliers.length} suppliers</span>
-                <span className="clearstock-kpi-action-hint">
-                  {filterStatus === "all" ? "Showing all" : "View all"} →
-                </span>
-              </div>
-            </div>
-
-            {/* Card 2: Reorder Now (Urgent Action - Warm Rose Gradient) */}
+          {/* Eye-Friendly Modern KPI Summary Cards (4 Actionable States in 1 Row) */}
+          <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
+            {/* Card 1: Reorder Now (Urgent Action - Warm Rose Gradient) */}
             <div
               className={`clearstock-kpi-card clearstock-kpi-card--reorder ${filterStatus === "Reorder Now" ? "is-active" : ""}`}
               onClick={() => setFilterStatus(filterStatus === "Reorder Now" ? "all" : "Reorder Now")}
@@ -2003,7 +1968,7 @@ export default function ReplenishmentDashboard() {
               </div>
             </div>
 
-            {/* Card 3: Incoming (Logistics / In Transit - Soft Sky Gradient) */}
+            {/* Card 2: Incoming (Logistics / In Transit - Soft Sky Gradient) */}
             <div
               className={`clearstock-kpi-card clearstock-kpi-card--incoming ${filterStatus === "Incoming" ? "is-active" : ""}`}
               onClick={() => setFilterStatus(filterStatus === "Incoming" ? "all" : "Incoming")}
@@ -2047,7 +2012,7 @@ export default function ReplenishmentDashboard() {
               </div>
             </div>
 
-            {/* Card 4: Overstocked (Dead Capital Alert - Warm Honey Amber Gradient) */}
+            {/* Card 3: Overstocked (Dead Capital Alert - Warm Honey Amber Gradient) */}
             <div
               className={`clearstock-kpi-card clearstock-kpi-card--overstocked ${filterStatus === "Overstocked" ? "is-active" : ""}`}
               onClick={() => setFilterStatus(filterStatus === "Overstocked" ? "all" : "Overstocked")}
@@ -2095,7 +2060,7 @@ export default function ReplenishmentDashboard() {
               </div>
             </div>
 
-            {/* Card 5: Stock OK (Healthy Inventory - Soft Emerald Gradient) */}
+            {/* Card 4: Stock OK (Healthy Inventory - Soft Emerald Gradient) */}
             <div
               className={`clearstock-kpi-card clearstock-kpi-card--ok ${filterStatus === "Stock OK" ? "is-active" : ""}`}
               onClick={() => setFilterStatus(filterStatus === "Stock OK" ? "all" : "Stock OK")}
@@ -2140,93 +2105,144 @@ export default function ReplenishmentDashboard() {
             </div>
           </InlineGrid>
 
-          {/* Data Table with IndexFilters & Toolbar */}
+          {/* Data Table Container */}
           <Card padding="0">
-            <IndexFilters
-              sortOptions={[]}
-              queryValue={searchQuery}
-              queryPlaceholder="Search product, variant, or SKU..."
-              onQueryChange={setSearchQuery}
-              onQueryClear={() => setSearchQuery("")}
-              onClearAll={handleClearAll}
-              tabs={tabs}
-              selected={selectedTab}
-              onSelect={(index) => setFilterStatus(tabStatuses[index])}
-              filters={[]}
-              appliedFilters={[]}
-              mode={mode}
-              setMode={setMode}
-              canCreateNewView={false}
-            />
-
-            {/* Toolbar */}
+            {/* Unified Controls Toolbar (Search + Supplier + Active Filter Tags + Sales Window + Math Guide) */}
             <Box
               padding="300"
-              borderBlockStartWidth="025"
-              borderColor="border-secondary"
               background="bg-surface-secondary"
+              borderBlockEndWidth="025"
+              borderColor="border-secondary"
             >
-              <InlineStack align="space-between" blockAlign="center" gap="400" wrap>
-                <InlineStack gap="400" blockAlign="center" wrap>
-                  <div style={{ minWidth: "220px" }}>
-                    <Select
-                      label="Supplier"
-                      labelInline
-                      options={supplierOptions}
-                      value={selectedSupplier}
-                      onChange={(val) => setSelectedSupplier(val)}
-                    />
-                  </div>
+              <BlockStack gap="200">
+                <InlineStack align="space-between" blockAlign="center" gap="300" wrap>
+                  {/* Left Controls: Search + Supplier Filter */}
+                  <InlineStack gap="300" blockAlign="center" wrap>
+                    <div style={{ minWidth: "240px", maxWidth: "340px", flex: "1 1 240px" }}>
+                      <TextField
+                        label="Search products"
+                        labelHidden
+                        placeholder="Search product, variant, or SKU..."
+                        value={searchQuery}
+                        onChange={setSearchQuery}
+                        autoComplete="off"
+                        clearButton
+                        onClearButtonClick={() => setSearchQuery("")}
+                        prefix={<Icon source={SearchIcon} />}
+                        size="slim"
+                      />
+                    </div>
 
-                  <InlineStack gap="200" blockAlign="center">
-                    <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
-                      Sales Window:
-                    </Text>
-                    <ButtonGroup variant="segmented">
-                      <Button
-                        size="slim"
-                        pressed={rollingWindow === "7"}
-                        onClick={() => setRollingWindow("7")}
-                      >
-                        7D
-                      </Button>
-                      <Button
-                        size="slim"
-                        pressed={rollingWindow === "14"}
-                        onClick={() => setRollingWindow("14")}
-                      >
-                        14D
-                      </Button>
-                      <Button
-                        size="slim"
-                        pressed={rollingWindow === "30"}
-                        onClick={() => setRollingWindow("30")}
-                      >
-                        30D
-                      </Button>
-                      <Button
-                        size="slim"
-                        pressed={rollingWindow === "90"}
-                        onClick={() => setRollingWindow("90")}
-                      >
-                        90D
-                      </Button>
-                    </ButtonGroup>
+                    <div style={{ minWidth: "180px" }}>
+                      <Select
+                        label="Supplier"
+                        labelInline
+                        options={supplierOptions}
+                        value={selectedSupplier}
+                        onChange={(val) => setSelectedSupplier(val)}
+                      />
+                    </div>
+                  </InlineStack>
+
+                  {/* Right Controls: Sales Lookback Window + How Calculations Work */}
+                  <InlineStack gap="300" blockAlign="center" wrap>
+                    <InlineStack gap="150" blockAlign="center">
+                      <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
+                        Sales Window:
+                      </Text>
+                      <ButtonGroup variant="segmented">
+                        <Button
+                          size="slim"
+                          pressed={rollingWindow === "7"}
+                          onClick={() => setRollingWindow("7")}
+                        >
+                          7D
+                        </Button>
+                        <Button
+                          size="slim"
+                          pressed={rollingWindow === "14"}
+                          onClick={() => setRollingWindow("14")}
+                        >
+                          14D
+                        </Button>
+                        <Button
+                          size="slim"
+                          pressed={rollingWindow === "30"}
+                          onClick={() => setRollingWindow("30")}
+                        >
+                          30D
+                        </Button>
+                        <Button
+                          size="slim"
+                          pressed={rollingWindow === "90"}
+                          onClick={() => setRollingWindow("90")}
+                        >
+                          90D
+                        </Button>
+                      </ButtonGroup>
+                    </InlineStack>
+
+                    <Button
+                      size="slim"
+                      onClick={() => {
+                        setGuideDefaultTab("math");
+                        setShowGuideModal(true);
+                      }}
+                    >
+                      🧮 How Calculations Work
+                    </Button>
                   </InlineStack>
                 </InlineStack>
 
-                <InlineStack gap="200" blockAlign="center">
-                  <Button
-                    size="slim"
-                    onClick={() => {
-                      setGuideDefaultTab("math");
-                      setShowGuideModal(true);
-                    }}
-                  >
-                    🧮 How Calculations Work
-                  </Button>
-                </InlineStack>
-              </InlineStack>
+                {/* Active Filter Badges & Reset Filters Bar */}
+                {hasActiveFilters && (
+                  <Box paddingBlockStart="100">
+                    <InlineStack gap="200" blockAlign="center" wrap>
+                      <Text as="span" variant="bodySm" tone="subdued" fontWeight="semibold">
+                        Active filters:
+                      </Text>
+
+                      {filterStatus !== "all" && (
+                        <Tag onRemove={() => setFilterStatus("all")}>
+                          Status: {filterStatus}
+                        </Tag>
+                      )}
+
+                      {selectedSupplier !== "all" && (
+                        <Tag onRemove={() => setSelectedSupplier("all")}>
+                          Supplier:{" "}
+                          {supplierOptions.find((s) => s.value === selectedSupplier)?.label ||
+                            selectedSupplier}
+                        </Tag>
+                      )}
+
+                      {searchQuery.trim().length > 0 && (
+                        <Tag onRemove={() => setSearchQuery("")}>
+                          Search: "{searchQuery}"
+                        </Tag>
+                      )}
+
+                      {isLookbackChanged && (
+                        <Tag
+                          onRemove={() =>
+                            setRollingWindow(loaderData?.defaultLookbackWindow || "30")
+                          }
+                        >
+                          Window: {rollingWindow}D
+                        </Tag>
+                      )}
+
+                      <Button
+                        variant="plain"
+                        tone="critical"
+                        onClick={handleClearAll}
+                      >
+                        Reset filters
+                      </Button>
+                    </InlineStack>
+                  </Box>
+                )}
+              </BlockStack>
             </Box>
 
             {/* IndexTable */}

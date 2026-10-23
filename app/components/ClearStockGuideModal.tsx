@@ -71,8 +71,8 @@ export function ClearStockGuideModal({
           zIndex: 10000,
           backgroundColor: "#ffffff",
           borderRadius: "14px",
-          width: "100%",
-          maxWidth: "720px",
+          width: "94vw",
+          maxWidth: "840px",
           maxHeight: "88vh",
           display: "flex",
           flexDirection: "column",
@@ -83,20 +83,22 @@ export function ClearStockGuideModal({
         {/* Header */}
         <div
           style={{
-            padding: "20px 24px",
+            padding: "16px 20px",
             borderBottom: "1px solid #e1e3e5",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             backgroundColor: "#f9fafb",
+            gap: "16px",
+            flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <span style={{ fontSize: "24px" }}>📖</span>
-            <div>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", minWidth: 0 }}>
+            <span style={{ fontSize: "24px", flexShrink: 0 }}>📖</span>
+            <div style={{ minWidth: 0 }}>
               <h2
                 id="clearstock-guide-modal-title"
-                style={{ fontSize: "18px", fontWeight: "700", color: "#202223", margin: 0 }}
+                style={{ fontSize: "17px", fontWeight: "700", color: "#202223", margin: 0 }}
               >
                 ClearStock Playbook & Technical Guide
               </h2>
@@ -108,23 +110,30 @@ export function ClearStockGuideModal({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close modal"
+            aria-label="Close"
             style={{
               background: "#f1f2f3",
               border: "1px solid #d2d5d8",
               cursor: "pointer",
-              fontSize: "14px",
+              fontSize: "16px",
+              lineHeight: "1",
               fontWeight: "600",
               color: "#5c5f62",
-              padding: "6px 12px",
+              width: "32px",
+              height: "32px",
               borderRadius: "8px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              padding: 0,
             }}
           >
-            ✕ Close
+            ✕
           </button>
         </div>
 
-        {/* Tab Switcher */}
+        {/* Tab Switcher (flexShrink: 0 ensures tabs NEVER collapse when content overflows) */}
         <div
           style={{
             display: "flex",
@@ -132,6 +141,11 @@ export function ClearStockGuideModal({
             padding: "0 16px",
             backgroundColor: "#ffffff",
             overflowX: "auto",
+            scrollbarWidth: "none",
+            gap: "4px",
+            flexShrink: 0,
+            minHeight: "46px",
+            alignItems: "stretch",
           }}
         >
           <button
@@ -145,7 +159,9 @@ export function ClearStockGuideModal({
               fontSize: "13px",
               fontWeight: activeTab === "math" ? "600" : "500",
               color: activeTab === "math" ? "#008060" : "#5c5f62",
-              borderBottom: activeTab === "math" ? "2px solid #008060" : "2px solid transparent",
+              borderBottom: activeTab === "math" ? "3px solid #008060" : "3px solid transparent",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
             }}
           >
             🧮 Replenishment Math
@@ -161,10 +177,12 @@ export function ClearStockGuideModal({
               fontSize: "13px",
               fontWeight: activeTab === "pos" ? "600" : "500",
               color: activeTab === "pos" ? "#008060" : "#5c5f62",
-              borderBottom: activeTab === "pos" ? "2px solid #008060" : "2px solid transparent",
+              borderBottom: activeTab === "pos" ? "3px solid #008060" : "3px solid transparent",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
             }}
           >
-            📦 Purchase Orders & Double-Order Guard
+            📦 Purchase Orders
           </button>
           <button
             type="button"
@@ -177,10 +195,12 @@ export function ClearStockGuideModal({
               fontSize: "13px",
               fontWeight: activeTab === "sync" ? "600" : "500",
               color: activeTab === "sync" ? "#008060" : "#5c5f62",
-              borderBottom: activeTab === "sync" ? "2px solid #008060" : "2px solid transparent",
+              borderBottom: activeTab === "sync" ? "3px solid #008060" : "3px solid transparent",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
             }}
           >
-            ⚡ Live Shopify Sync & Truth
+            ⚡ Live Shopify Sync
           </button>
           <button
             type="button"
@@ -193,15 +213,17 @@ export function ClearStockGuideModal({
               fontSize: "13px",
               fontWeight: activeTab === "faqs" ? "600" : "500",
               color: activeTab === "faqs" ? "#008060" : "#5c5f62",
-              borderBottom: activeTab === "faqs" ? "2px solid #008060" : "2px solid transparent",
+              borderBottom: activeTab === "faqs" ? "3px solid #008060" : "3px solid transparent",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
             }}
           >
             💡 Pro-Tips & Rules
           </button>
         </div>
 
-        {/* Modal Body */}
-        <div style={{ padding: "24px", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "20px" }}>
+        {/* Modal Body (minHeight: 0 enables flex child to scroll instead of collapsing siblings) */}
+        <div style={{ padding: "24px", overflowY: "auto", flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", gap: "20px" }}>
           
           {/* TAB 1: MATH */}
           {activeTab === "math" && (
@@ -491,6 +513,7 @@ export function ClearStockGuideModal({
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
+            flexShrink: 0,
           }}
         >
           <div style={{ fontSize: "12px", color: "#6d7175" }}>
