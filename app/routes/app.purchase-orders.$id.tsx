@@ -471,7 +471,7 @@ export default function PurchaseOrderDetailsAndReceiving() {
   };
 
   // Determine UI based on Status
-  let statusBadgeTone: "attention" | "info" | "warning" | "success" | "critical" = "info";
+  let statusBadgeTone: "info" | "warning" | "success" | "critical" | "caution" = "info";
   let statusBadgeText = "Ordered";
 
   if (po.status === "RECEIVED") {
@@ -481,7 +481,7 @@ export default function PurchaseOrderDetailsAndReceiving() {
     statusBadgeTone = "warning";
     statusBadgeText = "Partially Received";
   } else if (po.status === "DRAFT") {
-    statusBadgeTone = "attention";
+    statusBadgeTone = "info";
     statusBadgeText = "Draft";
   } else if (po.status === "CANCELLED") {
     statusBadgeTone = "critical";

@@ -628,18 +628,50 @@
   color: #78350f;
 }
 
+/* 5. Stock OK (Healthy Inventory - Soft Emerald Gradient) */
+.clearstock-kpi-card--ok {
+  --kpi-active-ring: #16a34a;
+  --kpi-shadow: rgba(22, 163, 74, 0.25);
+  background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 55%, #bbf7d0 120%);
+  border-color: #bbf7d0;
+}
+.clearstock-kpi-card--ok:hover {
+  border-color: #86efac;
+  box-shadow: 0 6px 18px -3px rgba(22, 163, 74, 0.18);
+}
+.clearstock-kpi-card--ok .clearstock-kpi-icon-badge {
+  background-color: #dcfce7;
+  color: #16a34a;
+  border: 1px solid #bbf7d0;
+}
+.clearstock-kpi-card--ok .clearstock-kpi-title {
+  color: #166534;
+}
+.clearstock-kpi-card--ok .clearstock-kpi-value {
+  color: #15803d;
+}
+.clearstock-kpi-card--ok .clearstock-kpi-footer {
+  color: #15803d;
+}
+.clearstock-kpi-card--ok .clearstock-kpi-active-pill {
+  background-color: #bbf7d0;
+  color: #14532d;
+}
+
 /* Common KPI Card Elements */
 .clearstock-kpi-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 6px;
+  gap: 6px;
 }
 
 .clearstock-kpi-header-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
 }
 
 .clearstock-kpi-icon-badge {
@@ -661,6 +693,9 @@
   font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .clearstock-kpi-value {
@@ -695,6 +730,8 @@
   letter-spacing: 0.05em;
   padding: 3px 8px;
   border-radius: 12px;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
 }
 
 /* ==========================================================================

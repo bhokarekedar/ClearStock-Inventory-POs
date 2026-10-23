@@ -1205,24 +1205,29 @@ export default function ReplenishmentDashboard() {
           : "Simple, transparent buying recommendations. Always know what to buy and when to buy."
       }
       primaryAction={
-        viewMode === "wizard" ? (
-          items.length > 0 ? (
-            <Button variant="primary" onClick={() => setViewMode("dashboard")}>
-              📊 View Dashboard
-            </Button>
-          ) : undefined
-        ) : undefined
+        viewMode === "wizard"
+          ? items.length > 0
+            ? {
+                content: "View Dashboard",
+                onAction: () => setViewMode("dashboard"),
+              }
+            : undefined
+          : {
+              content: "Create Purchase Order",
+              icon: PlusIcon,
+              onAction: () => navigate("/app/purchase-orders/new?returnTo=/app"),
+            }
       }
       secondaryActions={
         viewMode === "dashboard"
           ? [
               {
-                content: "Heal Data",
+                content: "Sync with Shopify",
                 icon: RefreshIcon,
-                loading: isHealing,
-                onAction: handleHealData,
+                loading: isSyncingCatalog,
+                onAction: handleSyncStoreData,
                 helpText:
-                  "Pulls the latest stock quantities from Shopify across all your locations and refreshes this table.",
+                  "Pulls latest products, variant SKUs, and live inventory levels from your Shopify store.",
               },
             ]
           : undefined
@@ -1904,9 +1909,53 @@ export default function ReplenishmentDashboard() {
       {/* ════════════════════════════════════════════════════════════ */}
       {viewMode === "dashboard" && (
         <BlockStack gap="500">
-          {/* Eye-Friendly Modern KPI Summary Cards (Interactive Filters) */}
-          <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="400">
-            {/* Card 1: Reorder Now (Urgent Action - Warm Rose Gradient) */}
+          {/* Eye-Friendly Modern KPI Summary Cards (Synchronized 1:1 with Table Tabs) */}
+          <InlineGrid columns={{ xs: 1, sm: 2, md: 3, lg: 5 }} gap="300">
+            {/* Card 1: All Items (System Base - Cool Slate Gradient) */}
+            <div
+              className={`clearstock-kpi-card clearstock-kpi-card--catalog ${filterStatus === "all" ? "is-active" : ""}`}
+              onClick={() => setFilterStatus("all")}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setFilterStatus("all");
+                }
+              }}
+              aria-pressed={filterStatus === "all"}
+            >
+              <div className="clearstock-kpi-header">
+                <div className="clearstock-kpi-header-left">
+                  <div className="clearstock-kpi-icon-badge">
+                    <Icon source={ProductIcon} />
+                  </div>
+                  <span className="clearstock-kpi-title">All Items</span>
+                </div>
+                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
+                  {filterStatus === "all" ? (
+                    <span className="clearstock-kpi-active-pill">Filtered ✓</span>
+                  ) : (
+                    <Tooltip content="All catalog items: Total products configured with suppliers and replenishment rules across your store.">
+                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
+                        <Icon source={InfoIcon} tone="subdued" />
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+              <div className="clearstock-kpi-value">
+                {summaryMetrics.activeSkusCount}
+              </div>
+              <div className="clearstock-kpi-footer">
+                <span>Across {suppliers.length} suppliers</span>
+                <span className="clearstock-kpi-action-hint">
+                  {filterStatus === "all" ? "Showing all" : "View all"} →
+                </span>
+              </div>
+            </div>
+
+            {/* Card 2: Reorder Now (Urgent Action - Warm Rose Gradient) */}
             <div
               className={`clearstock-kpi-card clearstock-kpi-card--reorder ${filterStatus === "Reorder Now" ? "is-active" : ""}`}
               onClick={() => setFilterStatus(filterStatus === "Reorder Now" ? "all" : "Reorder Now")}
@@ -1954,7 +2003,7 @@ export default function ReplenishmentDashboard() {
               </div>
             </div>
 
-            {/* Card 2: Incoming (Logistics / In Transit - Soft Sky Gradient) */}
+            {/* Card 3: Incoming (Logistics / In Transit - Soft Sky Gradient) */}
             <div
               className={`clearstock-kpi-card clearstock-kpi-card--incoming ${filterStatus === "Incoming" ? "is-active" : ""}`}
               onClick={() => setFilterStatus(filterStatus === "Incoming" ? "all" : "Incoming")}
@@ -1973,7 +2022,7 @@ export default function ReplenishmentDashboard() {
                   <div className="clearstock-kpi-icon-badge">
                     <Icon source={DeliveryIcon} />
                   </div>
-                  <span className="clearstock-kpi-title">Incoming (On Order)</span>
+                  <span className="clearstock-kpi-title">Incoming</span>
                 </div>
                 <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
                   {filterStatus === "Incoming" ? (
@@ -1994,50 +2043,6 @@ export default function ReplenishmentDashboard() {
                 <span>Units in transit on active POs</span>
                 <span className="clearstock-kpi-action-hint">
                   {filterStatus === "Incoming" ? "Showing only" : "View"} →
-                </span>
-              </div>
-            </div>
-
-            {/* Card 3: Active Catalog SKUs (System Base - Cool Slate Gradient) */}
-            <div
-              className={`clearstock-kpi-card clearstock-kpi-card--catalog ${filterStatus === "all" ? "is-active" : ""}`}
-              onClick={() => setFilterStatus("all")}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setFilterStatus("all");
-                }
-              }}
-              aria-pressed={filterStatus === "all"}
-            >
-              <div className="clearstock-kpi-header">
-                <div className="clearstock-kpi-header-left">
-                  <div className="clearstock-kpi-icon-badge">
-                    <Icon source={ProductIcon} />
-                  </div>
-                  <span className="clearstock-kpi-title">Active Catalog SKUs</span>
-                </div>
-                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
-                  {filterStatus === "all" ? (
-                    <span className="clearstock-kpi-active-pill">All SKUs</span>
-                  ) : (
-                    <Tooltip content="Active items: Total products configured with suppliers and reorder rules.">
-                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
-                        <Icon source={InfoIcon} tone="subdued" />
-                      </span>
-                    </Tooltip>
-                  )}
-                </div>
-              </div>
-              <div className="clearstock-kpi-value">
-                {summaryMetrics.activeSkusCount}
-              </div>
-              <div className="clearstock-kpi-footer">
-                <span>Across {suppliers.length} suppliers</span>
-                <span className="clearstock-kpi-action-hint">
-                  {filterStatus === "all" ? "Showing all" : "View all"} →
                 </span>
               </div>
             </div>
@@ -2086,6 +2091,50 @@ export default function ReplenishmentDashboard() {
                 </span>
                 <span className="clearstock-kpi-action-hint">
                   {filterStatus === "Overstocked" ? "Showing only" : "View"} →
+                </span>
+              </div>
+            </div>
+
+            {/* Card 5: Stock OK (Healthy Inventory - Soft Emerald Gradient) */}
+            <div
+              className={`clearstock-kpi-card clearstock-kpi-card--ok ${filterStatus === "Stock OK" ? "is-active" : ""}`}
+              onClick={() => setFilterStatus(filterStatus === "Stock OK" ? "all" : "Stock OK")}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setFilterStatus(filterStatus === "Stock OK" ? "all" : "Stock OK");
+                }
+              }}
+              aria-pressed={filterStatus === "Stock OK"}
+            >
+              <div className="clearstock-kpi-header">
+                <div className="clearstock-kpi-header-left">
+                  <div className="clearstock-kpi-icon-badge">
+                    <Icon source={CheckIcon} />
+                  </div>
+                  <span className="clearstock-kpi-title">Stock OK</span>
+                </div>
+                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
+                  {filterStatus === "Stock OK" ? (
+                    <span className="clearstock-kpi-active-pill">Filtered ✓</span>
+                  ) : (
+                    <Tooltip content="Healthy inventory: Products operating safely between your Reorder Point floor and optimal Target Stock Level. No replenishment or markdowns needed.">
+                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
+                        <Icon source={InfoIcon} tone="subdued" />
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+              <div className="clearstock-kpi-value">
+                {countByStatus["Stock OK"]}
+              </div>
+              <div className="clearstock-kpi-footer">
+                <span>Healthy stock levels</span>
+                <span className="clearstock-kpi-action-hint">
+                  {filterStatus === "Stock OK" ? "Showing only" : "View"} →
                 </span>
               </div>
             </div>
