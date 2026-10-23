@@ -239,9 +239,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
 
           const sku = v.sku || `SKU-${v.id.split("/").pop()}`;
-          const unitCost =
+          const shopifyUnitCost =
             parseFloat(v.inventoryItem?.unitCost?.amount || "0") || 0;
           const imageUrl = v.image?.url || p.featuredImage?.url || null;
+
+          const updateData: any = {
+            productId: p.id,
+            inventoryItemId: v.inventoryItem?.id || null,
+            title: p.title || "Untitled Product",
+            variantTitle: v.title || "",
+            imageUrl,
+            availableStock: totalAvailable ?? 0,
+            supplierSku: sku,
+          };
+          if (shopifyUnitCost > 0) {
+            updateData.unitCost = shopifyUnitCost;
+          }
 
           await prisma.variantSupplierRule.upsert({
             where: {
@@ -250,16 +263,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 variantId: v.id,
               },
             },
-            update: {
-              productId: p.id,
-              inventoryItemId: v.inventoryItem?.id || null,
-              title: p.title || "Untitled Product",
-              variantTitle: v.title || "",
-              imageUrl,
-              availableStock: totalAvailable ?? 0,
-              unitCost,
-              supplierSku: sku,
-            },
+            update: updateData,
             create: {
               shop: session.shop,
               variantId: v.id,
@@ -269,7 +273,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               variantTitle: v.title || "",
               imageUrl,
               availableStock: totalAvailable ?? 0,
-              unitCost,
+              unitCost: shopifyUnitCost > 0 ? shopifyUnitCost : 0,
               supplierSku: sku,
               supplierId: assignedSupplierId,
               leadTimeDays: 14,

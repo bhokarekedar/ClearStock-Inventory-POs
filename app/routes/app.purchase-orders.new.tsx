@@ -281,6 +281,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     },
   });
 
+  // Remember positive unit costs entered on the PO for future replenishment recommendations
+  for (const item of itemsData) {
+    if (Number(item.unitCost) > 0) {
+      await prisma.variantSupplierRule.updateMany({
+        where: { shop, variantId: item.variantId },
+        data: { unitCost: Number(item.unitCost) },
+      });
+    }
+  }
+
   return redirect(`/app/purchase-orders?${poStatus === "ORDERED" ? "issued" : "draft"}=${po.poNumber}`);
 };
 
@@ -332,6 +342,16 @@ export default function PurchaseOrderDraftEditor() {
     setItems((prev) =>
       prev.map((item) =>
         item.id === id ? { ...item, orderQuantity: isNaN(qty) ? 0 : qty } : item,
+      ),
+    );
+  };
+
+  // Update item unit cost
+  const handleCostChange = (id: string, newCostStr: string) => {
+    const cost = parseFloat(newCostStr);
+    setItems((prev) =>
+      prev.map((item) =>
+        item.id === id ? { ...item, unitCost: isNaN(cost) ? 0 : Math.max(0, cost) } : item,
       ),
     );
   };
@@ -643,10 +663,18 @@ export default function PurchaseOrderDraftEditor() {
 
                       {/* Unit Cost */}
                       <IndexTable.Cell>
-                        <div style={{ minWidth: "80px" }}>
-                          <Text as="span" variant="bodySm" fontWeight="medium">
-                            ${item.unitCost.toFixed(2)}
-                          </Text>
+                        <div style={{ width: "105px" }}>
+                          <TextField
+                            label="Unit Cost"
+                            labelHidden
+                            type="number"
+                            prefix="$"
+                            step={0.01}
+                            value={String(item.unitCost)}
+                            onChange={(val) => handleCostChange(item.id, val)}
+                            autoComplete="off"
+                            autoSize
+                          />
                         </div>
                       </IndexTable.Cell>
 
