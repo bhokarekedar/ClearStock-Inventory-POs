@@ -18,7 +18,8 @@
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
-    "seed:store": "tsx scripts/seed-store.ts"
+    "seed:store": "tsx scripts/seed-store.ts",
+    "seed:orders": "tsx scripts/seed-orders.ts"
   },
   "type": "module",
   "engines": {

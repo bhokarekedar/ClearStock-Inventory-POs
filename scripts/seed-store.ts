@@ -398,39 +398,11 @@ async function main() {
         },
       });
 
-      // 5. Seed 30 days of daily sales for mathematical replenishment
-      console.log(`      📈 Generating 30-day sales history (Avg ~${vSpec.dailySalesAvg}/day)...`);
-      const now = new Date();
-      for (let d = 1; d <= 30; d++) {
-        const saleDate = new Date(now);
-        saleDate.setDate(saleDate.getDate() - d);
-        saleDate.setUTCHours(0, 0, 0, 0);
-
-        // Add variance around daily average
-        const variance = (Math.random() - 0.5) * 2;
-        const unitsSold = Math.max(0, Math.round(vSpec.dailySalesAvg + variance));
-
-        await prisma.dailySalesAggregator.upsert({
-          where: {
-            shop_variantId_date: {
-              shop,
-              variantId,
-              date: saleDate,
-            },
-          },
-          update: { unitsSold },
-          create: {
-            shop,
-            variantId,
-            date: saleDate,
-            unitsSold,
-          },
-        });
-      }
     }
   }
 
-  console.log("\n🎉 SUCCESS! Real Shopify products, inventory, and sales velocity are live!");
+  console.log("\n🎉 SUCCESS! Real Shopify products and inventory are live in Shopify!");
+  console.log("ℹ️ Sales history will populate naturally from real Shopify orders / sync.");
   process.exit(0);
 }
 

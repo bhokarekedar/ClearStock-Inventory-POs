@@ -58,6 +58,7 @@ export interface RuleItem {
   packSize: number;
   minOrderQty: number;
   leadTimeDays: number | null;
+  safetyStockMinimum: number;
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -113,6 +114,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       packSize: r.packSize,
       minOrderQty: r.minOrderQty,
       leadTimeDays: r.leadTimeDays,
+      safetyStockMinimum: r.safetyStockMinimum ?? 0,
     };
   });
 
@@ -199,6 +201,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const unitCost = hasUnitCostOverride ? parseFloat(String(unitCostStr)) : 0;
     const packSize = Math.max(1, parseInt(String(formData.get("packSize") || "1"), 10));
     const minOrderQty = Math.max(1, parseInt(String(formData.get("minOrderQty") || "1"), 10));
+    const safetyStockMinimumStr = formData.get("safetyStockMinimum");
+    const safetyStockMinimum =
+      safetyStockMinimumStr !== null && String(safetyStockMinimumStr).trim() !== ""
+        ? Math.max(0, parseInt(String(safetyStockMinimumStr), 10))
+        : 0;
     const leadTimeStr = formData.get("leadTimeDays");
     const leadTimeDays = leadTimeStr ? parseInt(String(leadTimeStr), 10) : null;
     const syncVendor = formData.get("syncToShopifyVendor") === "true";
@@ -239,6 +246,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       supplierId,
       packSize,
       minOrderQty,
+      safetyStockMinimum,
       ...(leadTimeDays !== null ? { leadTimeDays } : {}),
     };
     if (hasUnitCostOverride) {
@@ -436,6 +444,7 @@ export default function SuppliersPage() {
   const [assignCost, setAssignCost] = useState("");
   const [assignPackSize, setAssignPackSize] = useState("12");
   const [assignMoq, setAssignMoq] = useState("24");
+  const [assignSafetyFloor, setAssignSafetyFloor] = useState("0");
   const [syncToShopifyVendor, setSyncToShopifyVendor] = useState(true);
   const [syncToShopifyCost, setSyncToShopifyCost] = useState(true);
   const [applyToAllVariants, setApplyToAllVariants] = useState(true);
@@ -488,6 +497,7 @@ export default function SuppliersPage() {
       setAssignCost(String(item.unitCost ?? "0.00"));
       setAssignPackSize(String(item.packSize ?? "12"));
       setAssignMoq(String(item.minOrderQty ?? "24"));
+      setAssignSafetyFloor(String(item.safetyStockMinimum ?? "0"));
     }
   };
 
@@ -598,6 +608,7 @@ export default function SuppliersPage() {
         unitCost: assignCost || "",
         packSize: assignPackSize || "1",
         minOrderQty: assignMoq || "1",
+        safetyStockMinimum: assignSafetyFloor || "0",
         syncToShopifyVendor: String(syncToShopifyVendor),
         syncToShopifyCost: String(syncToShopifyCost),
       },
@@ -1171,8 +1182,8 @@ export default function SuppliersPage() {
                     </Box>
                   )}
 
-                  <InlineStack gap="300">
-                    <div style={{ flex: 1 }}>
+                  <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
+                    <div>
                       <TextField
                         label="Purchase Unit Cost ($)"
                         type="number"
@@ -1181,30 +1192,40 @@ export default function SuppliersPage() {
                         onChange={setAssignCost}
                         autoComplete="off"
                         placeholder="Keep variant costs or override"
-                        helpText="Leave blank to preserve each variant's individual cost, or enter an amount to override."
+                        helpText="Blank preserves variant cost"
                       />
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div>
                       <TextField
                         label="Case Pack Size"
                         type="number"
                         value={assignPackSize}
                         onChange={setAssignPackSize}
                         autoComplete="off"
-                        helpText="Units per box"
+                        helpText="Units per box multiple"
                       />
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div>
                       <TextField
                         label="Min Order Qty (MOQ)"
                         type="number"
                         value={assignMoq}
                         onChange={setAssignMoq}
                         autoComplete="off"
-                        helpText="Vendor MOQ threshold"
+                        helpText="Supplier minimum order"
                       />
                     </div>
-                  </InlineStack>
+                    <div>
+                      <TextField
+                        label="Safety Floor Min"
+                        type="number"
+                        value={assignSafetyFloor}
+                        onChange={setAssignSafetyFloor}
+                        autoComplete="off"
+                        helpText="Hard safety floor (units)"
+                      />
+                    </div>
+                  </InlineGrid>
 
                   <Divider />
 
@@ -1281,6 +1302,7 @@ export default function SuppliersPage() {
                         { title: "Unit Cost" },
                         { title: "Case Pack" },
                         { title: "MOQ" },
+                        { title: "Safety Floor" },
                       ]}
                     >
                       {activeSupplierRules.map((r, idx) => (
@@ -1312,6 +1334,11 @@ export default function SuppliersPage() {
                             <Text as="span" variant="bodySm">
                               {`${r.minOrderQty} units`}
                             </Text>
+                          </IndexTable.Cell>
+                          <IndexTable.Cell>
+                            <Badge tone={r.safetyStockMinimum > 0 ? "attention" : undefined}>
+                              {`${r.safetyStockMinimum} units`}
+                            </Badge>
                           </IndexTable.Cell>
                         </IndexTable.Row>
                       ))}

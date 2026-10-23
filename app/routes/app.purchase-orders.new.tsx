@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useNavigate, useRouteError, useLoaderData, useSubmit, useNavigation, redirect } from "react-router";
+import { useNavigate, useRouteError, useLoaderData, useSubmit, useNavigation, redirect, useSearchParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   Page,
@@ -116,7 +116,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   function getRuleRecommendedQty(r: (typeof allRulesDb)[0]): { recommendedQty: number; deficit: number } {
     const variantSales = salesDb.filter((s) => s.variantId === r.variantId);
     const unitsSold = variantSales.reduce((sum: number, s) => sum + s.unitsSold, 0);
-    const ads = Number((unitsSold / lookbackDays).toFixed(1));
+    // High-precision float ADS to prevent early rounding error
+    const ads = lookbackDays > 0 ? unitsSold / lookbackDays : 0;
     const leadTime = r.leadTimeDays ?? r.supplier.defaultLeadTime;
     const leadTimeDemand = ads * leadTime;
     const safetyStock = Math.max(Math.round(ads * r.safetyStockDays), r.safetyStockMinimum);
@@ -131,24 +132,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const stockOnHand = r.availableStock || 0;
     const effectiveStock = stockOnHand + stockOnOrder;
 
-    // When below reorder point floor, order up to Target Stock Level
-    const rawDeficit = effectiveStock <= reorderPoint
-      ? Math.max(0, targetStockLevel - effectiveStock)
-      : 0;
-
-    if (rawDeficit > 0) {
-      const minUnitsNeeded = Math.max(rawDeficit, r.minOrderQty);
-      const casesCount = Math.ceil(minUnitsNeeded / r.packSize);
-      return {
-        recommendedQty: casesCount * r.packSize,
-        deficit: rawDeficit,
-      };
+    // Strict ROP Gate: Recommended order quantity is strictly 0 unless (OnHand + OnOrder) <= ROP
+    if (effectiveStock <= reorderPoint) {
+      const rawDeficit = Math.max(0, targetStockLevel - effectiveStock);
+      if (rawDeficit > 0) {
+        const minUnitsNeeded = Math.max(rawDeficit, r.minOrderQty);
+        const casesCount = Math.ceil(minUnitsNeeded / r.packSize);
+        return {
+          recommendedQty: casesCount * r.packSize,
+          deficit: rawDeficit,
+        };
+      }
     }
 
-    const minCases = Math.ceil(Math.max(r.minOrderQty, r.packSize) / r.packSize);
     return {
-      recommendedQty: minCases * r.packSize,
-      deficit: r.minOrderQty,
+      recommendedQty: 0,
+      deficit: 0,
     };
   }
 
@@ -291,6 +290,18 @@ export default function PurchaseOrderDraftEditor() {
   const submit = useSubmit();
   const navigation = useNavigation();
   const loaderData = useLoaderData<typeof loader>();
+  const [searchParams] = useSearchParams();
+  const returnTo = searchParams.get("returnTo");
+
+  const handleBack = () => {
+    if (returnTo) {
+      navigate(returnTo);
+    } else if (typeof window !== "undefined" && window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate("/app");
+    }
+  };
 
   const isSubmitting = navigation.state === "submitting";
 
@@ -404,7 +415,11 @@ export default function PurchaseOrderDraftEditor() {
       return;
     }
 
-    const initialDeficit = rule.recommendedQty || Math.max(rule.minOrderQty, rule.packSize);
+    // If item was triggered below ROP, use recommended order qty; otherwise default to supplier MOQ/pack size
+    const initialDeficit =
+      rule.recommendedQty > 0
+        ? rule.recommendedQty
+        : Math.max(rule.minOrderQty, rule.packSize);
     const newItem: DraftPOItem = {
       id: rule.ruleId,
       variantId: rule.variantId,
@@ -512,8 +527,8 @@ export default function PurchaseOrderDraftEditor() {
   return (
     <Page
       backAction={{
-        content: "Purchase Orders",
-        onAction: () => navigate("/app/purchase-orders"),
+        content: returnTo === "/app/purchase-orders" ? "Purchase Orders" : "Dashboard",
+        onAction: handleBack,
       }}
       title={`Create Purchase Order (${poNumber})`}
       subtitle={`Supplier: ${supplierName} • Order status will be created as Draft`}

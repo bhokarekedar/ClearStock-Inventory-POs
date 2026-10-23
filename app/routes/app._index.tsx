@@ -37,6 +37,10 @@ import {
   AlertCircleIcon,
   CheckIcon,
   InfoIcon,
+  AlertTriangleIcon,
+  DeliveryIcon,
+  ProductIcon,
+  CashDollarIcon,
 } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -112,11 +116,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       try {
         const ordersResponse = await admin.graphql(`
           query SyncStoreOrdersVelocity {
-            orders(first: 50, query: "status:open OR status:closed") {
+            orders(first: 250, query: "status:open OR status:closed") {
               edges {
                 node {
                   id
                   createdAt
+                  processedAt
                   displayFinancialStatus
                   cancelledAt
                   lineItems(first: 50) {
@@ -290,7 +295,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
         ordersCount++;
 
-        const date = new Date(o.createdAt);
+        const orderDateStr = o.processedAt || o.createdAt;
+        const date = new Date(orderDateStr);
         date.setUTCHours(0, 0, 0, 0);
 
         for (const itemEdge of o.lineItems?.edges || []) {
@@ -498,6 +504,85 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         });
       }
 
+      // Also heal/sync orders and sales velocity from Shopify
+      try {
+        const ordersResponse = await admin.graphql(`
+          query HealStoreOrdersVelocity {
+            orders(first: 250, query: "status:open OR status:closed") {
+              edges {
+                node {
+                  id
+                  createdAt
+                  processedAt
+                  displayFinancialStatus
+                  cancelledAt
+                  lineItems(first: 50) {
+                    edges {
+                      node {
+                        quantity
+                        variant {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `);
+        const ordersJson: any = await ordersResponse.json();
+        const orderEdges = ordersJson.data?.orders?.edges || [];
+
+        // Clear existing sales aggregator cache for fresh heal
+        await prisma.dailySalesAggregator.deleteMany({
+          where: { shop: session.shop },
+        });
+
+        for (const oEdge of orderEdges) {
+          const o = oEdge.node;
+          if (
+            o.cancelledAt ||
+            (o.displayFinancialStatus &&
+              o.displayFinancialStatus !== "PAID" &&
+              o.displayFinancialStatus !== "PARTIALLY_PAID")
+          ) {
+            continue;
+          }
+
+          const orderDateStr = o.processedAt || o.createdAt;
+          const date = new Date(orderDateStr);
+          date.setUTCHours(0, 0, 0, 0);
+
+          for (const itemEdge of o.lineItems?.edges || []) {
+            const item = itemEdge.node;
+            if (!item.variant?.id) continue;
+            const qty = parseInt(String(item.quantity || 0), 10);
+            if (qty <= 0) continue;
+
+            await prisma.dailySalesAggregator.upsert({
+              where: {
+                shop_variantId_date: {
+                  shop: session.shop,
+                  variantId: item.variant.id,
+                  date,
+                },
+              },
+              update: {
+                unitsSold: { increment: qty },
+              },
+              create: {
+                shop: session.shop,
+                variantId: item.variant.id,
+                date,
+              },
+            });
+          }
+        }
+      } catch (orderHealErr: any) {
+        console.warn("[Heal Orders Sync Warning]", orderHealErr.message);
+      }
+
       return { ok: true, healSuccess: true, syncedCount: variants.length };
     } catch (err: any) {
       console.error("[Heal Data Error]", err);
@@ -572,10 +657,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .filter((s) => new Date(s.date) >= date90dAgo)
       .reduce((sum: number, s) => sum + s.unitsSold, 0);
 
-    const ads7d = Number((unitsSold7d / 7).toFixed(1));
-    const ads14d = Number((unitsSold14d / 14).toFixed(1));
-    const ads30d = Number((unitsSold30d / 30).toFixed(1));
-    const ads90d = Number((unitsSold90d / 90).toFixed(1));
+    // High-precision float ADS to prevent early rounding error across lead-time and cycle multiplications
+    const ads7d = unitsSold7d > 0 ? unitsSold7d / 7 : 0;
+    const ads14d = unitsSold14d > 0 ? unitsSold14d / 14 : 0;
+    const ads30d = unitsSold30d > 0 ? unitsSold30d / 30 : 0;
+    const ads90d = unitsSold90d > 0 ? unitsSold90d / 90 : 0;
 
     // Incoming stock on open Purchase Orders
     const stockOnOrder = openPoItems
@@ -601,7 +687,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ads14d,
       ads30d,
       ads90d,
+      unitsSold7d,
+      unitsSold14d,
       unitsSold30d,
+      unitsSold90d,
       leadTimeDays: rule.leadTimeDays ?? rule.supplier.defaultLeadTime,
       safetyStockDays: rule.safetyStockDays,
       safetyStockMinimum: rule.safetyStockMinimum,
@@ -669,7 +758,10 @@ export interface ReplenishmentItem {
   ads14d: number;
   ads30d: number;
   ads90d: number;
+  unitsSold7d: number;
+  unitsSold14d: number;
   unitsSold30d: number;
+  unitsSold90d: number;
   leadTimeDays: number;
   safetyStockDays: number;
   safetyStockMinimum: number;
@@ -693,9 +785,11 @@ export function computeReplenishmentMath(
   const ads = adsMap[windowDays];
 
   // 1. Lead time demand (units sold while waiting for supplier delivery)
+  // High-precision float is maintained throughout intermediate calculations
   const leadTimeDemand = ads * item.leadTimeDays;
 
   // 2. Safety stock (buffer for spikes & shipping delays)
+  // Floor Min (item.safetyStockMinimum) prevents slow-moving items from having zero buffer
   const safetyStockFromDays = ads * item.safetyStockDays;
   const safetyStock = Math.max(
     Math.round(safetyStockFromDays),
@@ -713,9 +807,11 @@ export function computeReplenishmentMath(
 
   // 6. Current Stock Position (OnHand + Inbound on POs)
   const effectiveStock = item.stockOnHand + item.stockOnOrder;
-  const isBelowReorderPoint = effectiveStock <= reorderPoint;
 
-  // 7. Purchase Quantity: Replenish up to Target Stock Level
+  // 7. Strict ROP Gate:
+  // Recommended PO is strictly 0 unless (OnHand + OnOrder) <= ROP.
+  // Prevents premature replenishment when stock is between ROP and Target.
+  const isBelowReorderPoint = effectiveStock <= reorderPoint;
   let rawDeficit = 0;
   let recommendedUnits = 0;
   let casesCount = 0;
@@ -736,6 +832,7 @@ export function computeReplenishmentMath(
   // 8. Overstock Threshold (Ceiling): Target Stock Level + 15% buffer
   const overstockThreshold = Math.round(targetStockLevel * 1.15);
   const isOverstocked = ads > 0 && item.stockOnHand > overstockThreshold;
+  // Dead capital is calculated on all units held above your optimal Target Stock Level
   const deadCashValue = isOverstocked
     ? Math.max(0, item.stockOnHand - targetStockLevel) * item.unitCost
     : 0;
@@ -1090,7 +1187,7 @@ export default function ReplenishmentDashboard() {
       `Creating Draft Purchase Order with ${selectedResources.length} items (${rollingWindow}D velocity)...`,
     );
     navigate(
-      `/app/purchase-orders/new?items=${selectedResources.join(",")}&window=${rollingWindow}`,
+      `/app/purchase-orders/new?items=${selectedResources.join(",")}&window=${rollingWindow}&returnTo=/app`,
     );
   };
 
@@ -1806,97 +1903,191 @@ export default function ReplenishmentDashboard() {
       {/* ════════════════════════════════════════════════════════════ */}
       {viewMode === "dashboard" && (
         <BlockStack gap="500">
-          {/* KPI Summary Cards */}
+          {/* Eye-Friendly Modern KPI Summary Cards (Interactive Filters) */}
           <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="400">
-            <Card padding="400">
-              <BlockStack gap="100">
-                <InlineStack align="space-between" blockAlign="center">
-                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
-                    Reorder Now
-                  </Text>
-                  <Tooltip content="Products running low: Current stock plus incoming orders aren't enough to cover sales while waiting for delivery.">
-                    <Icon source={InfoIcon} tone="subdued" />
-                  </Tooltip>
-                </InlineStack>
-                <Text
-                  as="p"
-                  variant="headingXl"
-                  fontWeight="bold"
-                  tone={summaryMetrics.needingReorderCount > 0 ? "critical" : "success"}
-                >
-                  {summaryMetrics.needingReorderCount}
-                </Text>
-                <Text as="span" variant="bodyXs" tone="subdued">
+            {/* Card 1: Reorder Now (Urgent Action - Warm Rose Gradient) */}
+            <div
+              className={`clearstock-kpi-card clearstock-kpi-card--reorder ${filterStatus === "Reorder Now" ? "is-active" : ""}`}
+              onClick={() => setFilterStatus(filterStatus === "Reorder Now" ? "all" : "Reorder Now")}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setFilterStatus(filterStatus === "Reorder Now" ? "all" : "Reorder Now");
+                }
+              }}
+              aria-pressed={filterStatus === "Reorder Now"}
+            >
+              <div className="clearstock-kpi-header">
+                <div className="clearstock-kpi-header-left">
+                  <div className="clearstock-kpi-icon-badge">
+                    <Icon source={AlertTriangleIcon} />
+                  </div>
+                  <span className="clearstock-kpi-title">Reorder Now</span>
+                </div>
+                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
+                  {filterStatus === "Reorder Now" ? (
+                    <span className="clearstock-kpi-active-pill">Filtered ✓</span>
+                  ) : (
+                    <Tooltip content="Reorder trigger floor (ROP): Items where total stock (OnHand + Inbound on POs) has dropped to or below the safety floor. Suggested purchase orders bring stock up to your optimal Target Stock Level.">
+                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
+                        <Icon source={InfoIcon} tone="subdued" />
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+              <div className="clearstock-kpi-value">
+                {summaryMetrics.needingReorderCount}
+              </div>
+              <div className="clearstock-kpi-footer">
+                <span>
                   {summaryMetrics.needingReorderCount > 0
                     ? `Order ${summaryMetrics.totalUnitsToOrder.toLocaleString()} units (~$${summaryMetrics.totalEstimatedSpend.toFixed(0)})`
                     : "No stockout risks detected."}
-                </Text>
-              </BlockStack>
-            </Card>
+                </span>
+                <span className="clearstock-kpi-action-hint">
+                  {filterStatus === "Reorder Now" ? "Showing only" : "View"} →
+                </span>
+              </div>
+            </div>
 
-            <Card padding="400">
-              <BlockStack gap="100">
-                <InlineStack align="space-between" blockAlign="center">
-                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
-                    Incoming (On Order)
-                  </Text>
-                  <Tooltip content="Units already bought: Total items across active purchase orders that haven't arrived at your door yet.">
-                    <Icon source={InfoIcon} tone="subdued" />
-                  </Tooltip>
-                </InlineStack>
-                <Text as="p" variant="headingXl" fontWeight="bold">
-                  {summaryMetrics.totalInboundOnPOs.toLocaleString()}
-                </Text>
-                <Text as="span" variant="bodyXs" tone="subdued">
-                  Units in transit on active POs
-                </Text>
-              </BlockStack>
-            </Card>
+            {/* Card 2: Incoming (Logistics / In Transit - Soft Sky Gradient) */}
+            <div
+              className={`clearstock-kpi-card clearstock-kpi-card--incoming ${filterStatus === "Incoming" ? "is-active" : ""}`}
+              onClick={() => setFilterStatus(filterStatus === "Incoming" ? "all" : "Incoming")}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setFilterStatus(filterStatus === "Incoming" ? "all" : "Incoming");
+                }
+              }}
+              aria-pressed={filterStatus === "Incoming"}
+            >
+              <div className="clearstock-kpi-header">
+                <div className="clearstock-kpi-header-left">
+                  <div className="clearstock-kpi-icon-badge">
+                    <Icon source={DeliveryIcon} />
+                  </div>
+                  <span className="clearstock-kpi-title">Incoming (On Order)</span>
+                </div>
+                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
+                  {filterStatus === "Incoming" ? (
+                    <span className="clearstock-kpi-active-pill">Filtered ✓</span>
+                  ) : (
+                    <Tooltip content="Inbound stock: Total units across open purchase orders in transit. These count toward your inventory position to prevent double-ordering before delivery.">
+                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
+                        <Icon source={InfoIcon} tone="subdued" />
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+              <div className="clearstock-kpi-value">
+                {summaryMetrics.totalInboundOnPOs.toLocaleString()}
+              </div>
+              <div className="clearstock-kpi-footer">
+                <span>Units in transit on active POs</span>
+                <span className="clearstock-kpi-action-hint">
+                  {filterStatus === "Incoming" ? "Showing only" : "View"} →
+                </span>
+              </div>
+            </div>
 
-            <Card padding="400">
-              <BlockStack gap="100">
-                <InlineStack align="space-between" blockAlign="center">
-                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
-                    Active Catalog SKUs
-                  </Text>
-                  <Tooltip content="Active items: Total products configured with suppliers and reorder rules.">
-                    <Icon source={InfoIcon} tone="subdued" />
-                  </Tooltip>
-                </InlineStack>
-                <Text as="p" variant="headingXl" fontWeight="bold">
-                  {summaryMetrics.activeSkusCount}
-                </Text>
-                <Text as="span" variant="bodyXs" tone="subdued">
-                  Across {suppliers.length} suppliers
-                </Text>
-              </BlockStack>
-            </Card>
+            {/* Card 3: Active Catalog SKUs (System Base - Cool Slate Gradient) */}
+            <div
+              className={`clearstock-kpi-card clearstock-kpi-card--catalog ${filterStatus === "all" ? "is-active" : ""}`}
+              onClick={() => setFilterStatus("all")}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setFilterStatus("all");
+                }
+              }}
+              aria-pressed={filterStatus === "all"}
+            >
+              <div className="clearstock-kpi-header">
+                <div className="clearstock-kpi-header-left">
+                  <div className="clearstock-kpi-icon-badge">
+                    <Icon source={ProductIcon} />
+                  </div>
+                  <span className="clearstock-kpi-title">Active Catalog SKUs</span>
+                </div>
+                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
+                  {filterStatus === "all" ? (
+                    <span className="clearstock-kpi-active-pill">All SKUs</span>
+                  ) : (
+                    <Tooltip content="Active items: Total products configured with suppliers and reorder rules.">
+                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
+                        <Icon source={InfoIcon} tone="subdued" />
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+              <div className="clearstock-kpi-value">
+                {summaryMetrics.activeSkusCount}
+              </div>
+              <div className="clearstock-kpi-footer">
+                <span>Across {suppliers.length} suppliers</span>
+                <span className="clearstock-kpi-action-hint">
+                  {filterStatus === "all" ? "Showing all" : "View all"} →
+                </span>
+              </div>
+            </div>
 
-            <Card padding="400">
-              <BlockStack gap="100">
-                <InlineStack align="space-between" blockAlign="center">
-                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
-                    Overstocked
-                  </Text>
-                  <Tooltip content="Overstocked value: Cash tied up in products that exceed your Target Stock Level ceiling (+15% buffer).">
-                    <Icon source={InfoIcon} tone="subdued" />
-                  </Tooltip>
-                </InlineStack>
-                <Text
-                  as="p"
-                  variant="headingXl"
-                  fontWeight="bold"
-                  tone={summaryMetrics.totalDeadCash > 0 ? "caution" : "subdued"}
-                >
-                  ${summaryMetrics.totalDeadCash.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                </Text>
-                <Text as="span" variant="bodyXs" tone="subdued">
+            {/* Card 4: Overstocked (Dead Capital Alert - Warm Honey Amber Gradient) */}
+            <div
+              className={`clearstock-kpi-card clearstock-kpi-card--overstocked ${filterStatus === "Overstocked" ? "is-active" : ""}`}
+              onClick={() => setFilterStatus(filterStatus === "Overstocked" ? "all" : "Overstocked")}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setFilterStatus(filterStatus === "Overstocked" ? "all" : "Overstocked");
+                }
+              }}
+              aria-pressed={filterStatus === "Overstocked"}
+            >
+              <div className="clearstock-kpi-header">
+                <div className="clearstock-kpi-header-left">
+                  <div className="clearstock-kpi-icon-badge">
+                    <Icon source={CashDollarIcon} />
+                  </div>
+                  <span className="clearstock-kpi-title">Overstocked</span>
+                </div>
+                <div className="clearstock-kpi-header-right" onClick={(e) => e.stopPropagation()}>
+                  {filterStatus === "Overstocked" ? (
+                    <span className="clearstock-kpi-active-pill">Filtered ✓</span>
+                  ) : (
+                    <Tooltip content="Overstocked value: Cash tied up in products that exceed your Target Stock Level ceiling (+15% buffer). Dead capital is calculated on all units held above your optimal Target Stock Level.">
+                      <span style={{ cursor: "pointer", display: "inline-flex" }}>
+                        <Icon source={InfoIcon} tone="subdued" />
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+              <div className="clearstock-kpi-value">
+                ${summaryMetrics.totalDeadCash.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              </div>
+              <div className="clearstock-kpi-footer">
+                <span>
                   {summaryMetrics.overstockedCount > 0
                     ? `${summaryMetrics.overstockedCount} SKUs overstocked`
                     : "Zero overstocked items"}
-                </Text>
-              </BlockStack>
-            </Card>
+                </span>
+                <span className="clearstock-kpi-action-hint">
+                  {filterStatus === "Overstocked" ? "Showing only" : "View"} →
+                </span>
+              </div>
+            </div>
           </InlineGrid>
 
           {/* Data Table with IndexFilters & Toolbar */}
@@ -2005,13 +2196,13 @@ export default function ReplenishmentDashboard() {
                 ]}
                 headings={[
                   { title: "Product & SKU" },
-                  { title: "Supplier" },
-                  { title: `Velocity (${rollingWindow}d ADS)` },
+                  { title: "Status" },
+                  { title: "Recommended PO" },
                   { title: "Stock on Hand" },
                   { title: "On Order" },
                   { title: "Reorder Point" },
-                  { title: "Recommended PO" },
-                  { title: "Status" },
+                  { title: `Velocity (${rollingWindow}d ADS)` },
+                  { title: "Supplier" },
                   { title: "Details" },
                 ]}
               >
@@ -2039,6 +2230,7 @@ export default function ReplenishmentDashboard() {
                         selected={isSelected}
                         position={index}
                       >
+                        {/* 1. Product & SKU */}
                         <IndexTable.Cell>
                           <InlineStack gap="300" blockAlign="center" wrap={false}>
                             {row.imageUrl ? (
@@ -2068,106 +2260,48 @@ export default function ReplenishmentDashboard() {
                                   {row.variantTitle}
                                 </Text>
                               )}
-                              <Text as="span" variant="bodyXs" tone="subdued">
-                                SKU: {row.sku || "N/A"}
-                              </Text>
+                              <InlineStack gap="100" blockAlign="center">
+                                <Text as="span" variant="bodyXs" tone="subdued">
+                                  SKU: {row.sku || "N/A"}
+                                </Text>
+                                <Text as="span" variant="bodyXs" tone="subdued">
+                                  •
+                                </Text>
+                                <Text as="span" variant="bodyXs" tone="subdued">
+                                  {row.supplierName}
+                                </Text>
+                              </InlineStack>
                             </BlockStack>
                           </InlineStack>
                         </IndexTable.Cell>
 
-                        <IndexTable.Cell>
-                          <Tooltip
-                            content={`Delivery speed: It takes about ${row.leadTimeDays} days from the day you order from ${row.supplierName} until items arrive at your door.`}
-                            dismissOnMouseOut
-                          >
-                            <div style={{ cursor: "help" }}>
-                              <Text as="span" variant="bodySm">
-                                {row.supplierName}
-                              </Text>
-                              <Text as="p" variant="bodyXs" tone="subdued">
-                                {row.leadTimeDays}d lead time
-                              </Text>
-                            </div>
-                          </Tooltip>
-                        </IndexTable.Cell>
-
-                        <IndexTable.Cell>
-                          <Tooltip
-                            content={`How fast it sells: You're selling about ${calc.ads} units a day, based on ${row.unitsSold30d} total sales over the last 30 days.`}
-                            dismissOnMouseOut
-                          >
-                            <div style={{ cursor: "help" }}>
-                              <Text as="span" variant="bodySm" fontWeight="bold">
-                                {calc.ads} units/d
-                              </Text>
-                              <Text as="p" variant="bodyXs" tone="subdued">
-                                {row.unitsSold30d} sold in 30d
-                              </Text>
-                            </div>
-                          </Tooltip>
-                        </IndexTable.Cell>
-
-                        <IndexTable.Cell>
-                          <Tooltip
-                            content={`What's left: You have ${row.stockOnHand.toLocaleString()} units available. Selling ${calc.ads} per day, this will last roughly ${calc.daysOfCoverageOnHand} days before you run out.`}
-                            dismissOnMouseOut
-                          >
-                            <div style={{ cursor: "help" }}>
-                              <Text as="span" variant="bodySm" fontWeight="bold">
-                                {row.stockOnHand.toLocaleString()}
-                              </Text>
-                              <Text as="p" variant="bodyXs" tone="subdued">
-                                {calc.daysOfCoverageOnHand > 0
-                                  ? `${calc.daysOfCoverageOnHand}d runway`
-                                  : "0d runway"}
-                              </Text>
-                            </div>
-                          </Tooltip>
-                        </IndexTable.Cell>
-
+                        {/* 2. Status (Immediate visual priority) */}
                         <IndexTable.Cell>
                           <Tooltip
                             content={
-                              row.stockOnOrder > 0
-                                ? `Units already bought: You have ${row.stockOnOrder} units across active purchase orders. We count these so you don't accidentally order the same stock twice.`
-                                : "No units on order: You don't have any pending purchase orders for this item."
+                              calc.statusLabel === "Reorder Now"
+                                ? `⚠️ Reorder Now: Total stock (${calc.effectiveStock} = ${row.stockOnHand} on hand + ${row.stockOnOrder} on order) is at or below your order trigger floor (${calc.reorderPoint}). Order ${calc.recommendedUnits} units to restock up to your Target Stock Level (${calc.targetStockLevel}).`
+                                : calc.statusLabel === "Incoming"
+                                ? `🚚 Incoming: Shelf stock (${row.stockOnHand}) has hit the safety floor, but ${row.stockOnOrder} inbound units on open POs bring total stock to ${calc.effectiveStock}, covering lead-time demand.`
+                                : calc.statusLabel === "Overstocked"
+                                ? `📦 Overstocked: You have ${row.stockOnHand.toLocaleString()} units on hand, which exceeds your Target Stock Level ceiling of ${calc.targetStockLevel} units (+15% buffer = ${calc.overstockThreshold} units). Dead capital ($${calc.deadCashValue.toLocaleString()}) is calculated on all units held above your optimal Target Stock Level.`
+                                : `✅ Stock OK: Total stock (${calc.effectiveStock}) is safely above your order trigger floor (${calc.reorderPoint}) and within your target ceiling (${calc.overstockThreshold} units). No reorder needed.`
                             }
                             dismissOnMouseOut
                           >
                             <div style={{ cursor: "help", display: "inline-block" }}>
-                              {row.stockOnOrder > 0 ? (
-                                <Badge tone="info">{`+${row.stockOnOrder}`}</Badge>
-                              ) : (
-                                <Text as="span" variant="bodySm" tone="subdued">
-                                  —
-                                </Text>
-                              )}
+                              <Badge tone={calc.statusTone}>{calc.statusLabel}</Badge>
                             </div>
                           </Tooltip>
                         </IndexTable.Cell>
 
-                        <IndexTable.Cell>
-                          <Tooltip
-                            content={`Order trigger (floor): When total stock drops to ${calc.reorderPoint} units, place an order. Covers sales during ${row.leadTimeDays}d delivery (${calc.leadTimeDemand} units) plus safety buffer (${calc.safetyStock} units).`}
-                            dismissOnMouseOut
-                          >
-                            <div style={{ cursor: "help" }}>
-                              <Text as="span" variant="bodySm" fontWeight="bold">
-                                {calc.reorderPoint}
-                              </Text>
-                              <Text as="p" variant="bodyXs" tone="subdued">
-                                Safety: {calc.safetyStock}
-                              </Text>
-                            </div>
-                          </Tooltip>
-                        </IndexTable.Cell>
-
+                        {/* 3. Recommended PO */}
                         <IndexTable.Cell>
                           <Tooltip
                             content={
                               calc.recommendedUnits > 0
-                                ? `Suggested buy: You need ${calc.rawDeficit} units to replenish up to your Target Stock Level (${calc.targetStockLevel} units = ROP ${calc.reorderPoint} + ${calc.cycleStock} cycle stock). Adjusted to ${calc.recommendedUnits} units (${calc.casesCount} box${calc.casesCount === 1 ? "" : "es"}) to match supplier MOQ and case pack rules.`
-                                : `No order needed: Your stock (${row.stockOnHand}) and incoming orders (${row.stockOnOrder}) are above your order trigger (${calc.reorderPoint} units).`
+                                ? `Suggested replenishment: You need ${calc.rawDeficit} units to reach your Target Stock Level (${calc.targetStockLevel} units = ROP ${calc.reorderPoint} + ${calc.cycleStock} cycle stock). Adjusted to ${calc.recommendedUnits} units (${calc.casesCount} case${calc.casesCount === 1 ? "" : "s"}) to meet supplier MOQ (${row.minOrderQty}) and case pack multiple (${row.packSize}).`
+                                : `No order needed: Total stock (${calc.effectiveStock} units) is above your order trigger floor (${calc.reorderPoint} units). Strict ROP Gate prevents premature top-ups.`
                             }
                             dismissOnMouseOut
                           >
@@ -2190,25 +2324,112 @@ export default function ReplenishmentDashboard() {
                           </Tooltip>
                         </IndexTable.Cell>
 
+                        {/* 4. Stock on Hand */}
                         <IndexTable.Cell>
                           <Tooltip
-                            content={
-                              calc.statusLabel === "Reorder Now"
-                                ? `⚠️ Time to order. You have ${row.stockOnHand} in stock and ${row.stockOnOrder} on the way (total ${calc.effectiveStock}), which is at or below your order trigger (${calc.reorderPoint}). Order ${calc.recommendedUnits} units to restock up to your target level.`
-                                : calc.statusLabel === "Incoming"
-                                ? `🚚 Stock is on the way. Shelf stock (${row.stockOnHand}) is low, but ${row.stockOnOrder} incoming units already ordered will bring total stock to ${calc.effectiveStock}, covering your needs.`
-                                : calc.statusLabel === "Overstocked"
-                                ? `📦 Overstocked. You have ${row.stockOnHand.toLocaleString()} units on hand, which exceeds your Target Stock Level ceiling of ${calc.targetStockLevel} units (+15% buffer). Holding extra stock ties up your cash.`
-                                : `✅ You're in good shape. Your total stock (${calc.effectiveStock}) is safely above your order trigger (${calc.reorderPoint}) and within your target ceiling (${calc.targetStockLevel}). No need to order right now.`
-                            }
+                            content={`What's left: You have ${row.stockOnHand.toLocaleString()} units available. Selling ${calc.ads.toFixed(1)} per day, this will last roughly ${calc.daysOfCoverageOnHand} days before you run out.`}
                             dismissOnMouseOut
                           >
-                            <div style={{ cursor: "help", display: "inline-block" }}>
-                              <Badge tone={calc.statusTone}>{calc.statusLabel}</Badge>
+                            <div style={{ cursor: "help" }}>
+                              <Text as="span" variant="bodySm" fontWeight="bold">
+                                {row.stockOnHand.toLocaleString()}
+                              </Text>
+                              <Text as="p" variant="bodyXs" tone="subdued">
+                                {calc.daysOfCoverageOnHand > 0
+                                  ? `${calc.daysOfCoverageOnHand}d runway`
+                                  : "0d runway"}
+                              </Text>
                             </div>
                           </Tooltip>
                         </IndexTable.Cell>
 
+                        {/* 5. On Order */}
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={
+                              row.stockOnOrder > 0
+                                ? `Units already bought: You have ${row.stockOnOrder} units across active purchase orders. We count these so you don't accidentally order the same stock twice.`
+                                : "No units on order: You don't have any pending purchase orders for this item."
+                            }
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help", display: "inline-block" }}>
+                              {row.stockOnOrder > 0 ? (
+                                <Badge tone="info">{`+${row.stockOnOrder}`}</Badge>
+                              ) : (
+                                <Text as="span" variant="bodySm" tone="subdued">
+                                  —
+                                </Text>
+                              )}
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        {/* 6. Reorder Point */}
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={`Order trigger floor (ROP): When total available stock drops to ${calc.reorderPoint} units, place an order. Covers sales during ${row.leadTimeDays}d delivery (${calc.leadTimeDemand} units) plus safety buffer (${calc.safetyStock} units${row.safetyStockMinimum > 0 && calc.safetyStock === row.safetyStockMinimum ? ` - enforced by ${row.safetyStockMinimum} unit floor` : ""}).`}
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help" }}>
+                              <Text as="span" variant="bodySm" fontWeight="bold">
+                                {calc.reorderPoint}
+                              </Text>
+                              <Text as="p" variant="bodyXs" tone="subdued">
+                                Safety: {calc.safetyStock}
+                              </Text>
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        {/* 7. Velocity (ADS) */}
+                        <IndexTable.Cell>
+                          {(() => {
+                            const windowUnitsSold =
+                              rollingWindow === "7"
+                                ? row.unitsSold7d
+                                : rollingWindow === "14"
+                                ? row.unitsSold14d
+                                : rollingWindow === "90"
+                                ? row.unitsSold90d
+                                : row.unitsSold30d;
+
+                            return (
+                              <Tooltip
+                                content={`How fast it sells: You're selling about ${calc.ads.toFixed(1)} units a day, based on ${windowUnitsSold} total sales over the last ${rollingWindow} days.`}
+                                dismissOnMouseOut
+                              >
+                                <div style={{ cursor: "help" }}>
+                                  <Text as="span" variant="bodySm" fontWeight="bold">
+                                    {calc.ads.toFixed(1)} units/d
+                                  </Text>
+                                  <Text as="p" variant="bodyXs" tone="subdued">
+                                    {windowUnitsSold} sold in {rollingWindow}d
+                                  </Text>
+                                </div>
+                              </Tooltip>
+                            );
+                          })()}
+                        </IndexTable.Cell>
+
+                        {/* 8. Supplier */}
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={`Delivery speed: It takes about ${row.leadTimeDays} days from the day you order from ${row.supplierName} until items arrive at your door.`}
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help" }}>
+                              <Text as="span" variant="bodySm">
+                                {row.supplierName}
+                              </Text>
+                              <Text as="p" variant="bodyXs" tone="subdued">
+                                {row.leadTimeDays}d lead time
+                              </Text>
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        {/* 9. Actions */}
                         <IndexTable.Cell>
                           <InlineStack gap="150" blockAlign="center">
                             {calc.recommendedUnits > 0 && (
@@ -2217,7 +2438,7 @@ export default function ReplenishmentDashboard() {
                                 variant="primary"
                                 onClick={() => {
                                   navigate(
-                                    `/app/purchase-orders/new?items=${row.id}&window=${rollingWindow}`,
+                                    `/app/purchase-orders/new?items=${row.id}&window=${rollingWindow}&returnTo=/app`,
                                   );
                                 }}
                               >
@@ -2392,15 +2613,15 @@ export default function ReplenishmentDashboard() {
               >
                 <div>
                   <strong>1. Average Daily Sales (ADS):</strong>{" "}
-                  <code>{activeMath.ads} units/day</code> ({rollingWindow}-day rolling window)
+                  <code>{activeMath.ads.toFixed(1)} units/day</code> ({rollingWindow}-day window, exact: <code>{activeMath.ads.toFixed(4)}</code>)
                 </div>
                 <div>
                   <strong>2. Lead Time Demand:</strong>{" "}
-                  <code>{activeMath.ads} × {activeMathItem.leadTimeDays}d = {activeMath.leadTimeDemand} units</code>
+                  <code>{activeMath.ads.toFixed(4)} × {activeMathItem.leadTimeDays}d = {activeMath.leadTimeDemand} units</code>
                 </div>
                 <div>
                   <strong>3. Safety Stock Buffer:</strong>{" "}
-                  <code>{activeMath.safetyStock} units</code> ({activeMathItem.safetyStockDays}d coverage)
+                  <code>{activeMath.safetyStock} units</code> (Max of {activeMathItem.safetyStockDays}d coverage: {Math.round(activeMath.ads * activeMathItem.safetyStockDays)} units, Floor Min: {activeMathItem.safetyStockMinimum} units)
                 </div>
                 <div>
                   <strong>4. Reorder Point (ROP Floor):</strong>{" "}
@@ -2408,7 +2629,7 @@ export default function ReplenishmentDashboard() {
                 </div>
                 <div>
                   <strong>5. Cycle Stock (Order Cycle):</strong>{" "}
-                  <code>{activeMath.ads} × {activeMath.reorderFrequencyDays}d = {activeMath.cycleStock} units</code>
+                  <code>{activeMath.ads.toFixed(4)} × {activeMath.reorderFrequencyDays}d = {activeMath.cycleStock} units</code>
                 </div>
                 <div>
                   <strong>6. Target Stock Level (Ceiling):</strong>{" "}
@@ -2420,15 +2641,15 @@ export default function ReplenishmentDashboard() {
                 </div>
                 <div>
                   <strong>8. Purchase Quantity (Deficit):</strong>{" "}
-                  <code>{activeMath.isBelowReorderPoint ? `Target (${activeMath.targetStockLevel}) - Effective (${activeMath.effectiveStock}) = ${activeMath.rawDeficit} units` : "0 units (Stock above ROP floor)"}</code>
+                  <code>{activeMath.isBelowReorderPoint ? `Target (${activeMath.targetStockLevel}) - Effective (${activeMath.effectiveStock}) = ${activeMath.rawDeficit} units` : "0 units (Strict ROP Gate: Stock is above ROP floor - No order needed)"}</code>
                 </div>
                 <div>
                   <strong>9. Case Pack & MOQ Rounding:</strong>{" "}
                   <code>MOQ: {activeMathItem.minOrderQty}, Pack Size: {activeMathItem.packSize} → {activeMath.recommendedUnits} units ({activeMath.casesCount} cases)</code>
                 </div>
                 <div>
-                  <strong>10. Overstock Ceiling (+15%):</strong>{" "}
-                  <code>Target ({activeMath.targetStockLevel}) × 1.15 = {activeMath.overstockThreshold} units (Current OnHand: {activeMath.stockOnHand})</code>
+                  <strong>10. Overstock & Dead Capital:</strong>{" "}
+                  <code>Target ({activeMath.targetStockLevel}) × 1.15 = {activeMath.overstockThreshold} units threshold. {activeMath.isOverstocked ? `Dead Capital: (${activeMath.stockOnHand} OnHand - ${activeMath.targetStockLevel} Target) × $${activeMathItem.unitCost.toFixed(2)} = $${activeMath.deadCashValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Not overstocked"}. (Dead capital is calculated on all units held above your optimal Target Stock Level.)</code>
                 </div>
               </div>
             </BlockStack>

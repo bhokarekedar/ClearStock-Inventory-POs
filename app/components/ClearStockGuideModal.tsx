@@ -282,10 +282,10 @@ export function ClearStockGuideModal({
                   <div style={{ fontSize: "11px", textTransform: "uppercase", fontWeight: "700", color: "#6d7175" }}>6. Purchase Quantity</div>
                   <div style={{ fontSize: "14px", fontWeight: "700", margin: "4px 0", color: "#202223" }}>Recommended Order Qty</div>
                   <code style={{ display: "block", backgroundColor: "#ffffff", padding: "6px 8px", borderRadius: "6px", fontSize: "12px", border: "1px solid #e1e3e5", color: "#2c6ecb" }}>
-                    Qty = Target Level - (OnHand + OnOrder)
+                    Qty = Target Level - (OnHand + OnOrder) (when Stock &le; ROP)
                   </code>
                   <p style={{ margin: "8px 0 0 0", fontSize: "12px", color: "#5c5f62" }}>
-                    Orders enough to reach your Target Level, rounded up to supplier MOQ & Master Case Pack multiples.
+                    <strong>Strict ROP Gate:</strong> Only triggers when available stock hits or drops below the ROP floor. Orders up to Target Level, rounded up to MOQ & Case Pack multiples. If stock &gt; ROP, Qty = 0.
                   </p>
                 </div>
               </div>
@@ -317,7 +317,7 @@ export function ClearStockGuideModal({
                   </div>
                   <div>
                     <span style={{ fontWeight: "700", color: "#b98900" }}>📦 Overstocked:</span>{" "}
-                    <code>OnHand &gt; Target Level + 15%</code>. Holding more stock than your target ceiling (+15% tolerance buffer), which ties up working capital.
+                    <code>OnHand &gt; Target Level + 15%</code>. Holding more stock than your target ceiling (+15% tolerance buffer), which ties up working capital. <em>Note: Dead capital is calculated on all units held above your optimal Target Stock Level.</em>
                   </div>
                 </div>
               </div>

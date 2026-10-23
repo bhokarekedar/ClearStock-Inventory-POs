@@ -381,7 +381,7 @@ export default function PurchaseOrdersPage() {
           content: "Continue to Order Editor",
           onAction: () => {
             setIsCreateModalOpen(false);
-            navigate(`/app/purchase-orders/new?supplierId=${chosenSupplierId}`);
+            navigate(`/app/purchase-orders/new?supplierId=${chosenSupplierId}&returnTo=/app/purchase-orders`);
           },
           disabled: !chosenSupplierId,
         }}

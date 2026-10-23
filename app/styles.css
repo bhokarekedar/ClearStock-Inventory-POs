@@ -479,3 +479,438 @@
   border-color: #008060 !important;
   box-shadow: inset 0 0 0 20px #008060 !important;
 }
+
+/* ==========================================================================
+   ClearStock Modern Eye-Friendly KPI Cards & Action Badges
+   Warm pastel gradients with clear semantic contrast to prevent eye strain
+   ========================================================================== */
+.clearstock-kpi-card {
+  position: relative;
+  border-radius: 14px;
+  padding: 16px 18px;
+  border: 1px solid transparent;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 132px;
+  box-sizing: border-box;
+}
+
+.clearstock-kpi-card:hover {
+  transform: translateY(-2px);
+}
+
+.clearstock-kpi-card.is-active {
+  box-shadow: 0 0 0 2.5px var(--kpi-active-ring), 0 10px 22px -5px var(--kpi-shadow) !important;
+  transform: translateY(-2px);
+}
+
+/* 1. Reorder Now (Urgent Action - Warm Rose Gradient) */
+.clearstock-kpi-card--reorder {
+  --kpi-active-ring: #e11d48;
+  --kpi-shadow: rgba(225, 29, 72, 0.25);
+  background: linear-gradient(135deg, #fff1f2 0%, #ffe4e6 55%, #fecdd3 120%);
+  border-color: #fecdd3;
+}
+.clearstock-kpi-card--reorder:hover {
+  border-color: #fda4af;
+  box-shadow: 0 6px 18px -3px rgba(225, 29, 72, 0.18);
+}
+.clearstock-kpi-card--reorder .clearstock-kpi-icon-badge {
+  background-color: #ffe4e6;
+  color: #e11d48;
+  border: 1px solid #fecdd3;
+}
+.clearstock-kpi-card--reorder .clearstock-kpi-title {
+  color: #9f1239;
+}
+.clearstock-kpi-card--reorder .clearstock-kpi-value {
+  color: #9f1239;
+}
+.clearstock-kpi-card--reorder .clearstock-kpi-footer {
+  color: #be123c;
+}
+.clearstock-kpi-card--reorder .clearstock-kpi-active-pill {
+  background-color: #fecdd3;
+  color: #9f1239;
+}
+
+/* 2. Incoming (Logistics / On Order - Soft Sky Gradient) */
+.clearstock-kpi-card--incoming {
+  --kpi-active-ring: #0284c7;
+  --kpi-shadow: rgba(2, 132, 199, 0.25);
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 55%, #bae6fd 120%);
+  border-color: #bae6fd;
+}
+.clearstock-kpi-card--incoming:hover {
+  border-color: #7dd3fc;
+  box-shadow: 0 6px 18px -3px rgba(2, 132, 199, 0.18);
+}
+.clearstock-kpi-card--incoming .clearstock-kpi-icon-badge {
+  background-color: #e0f2fe;
+  color: #0284c7;
+  border: 1px solid #bae6fd;
+}
+.clearstock-kpi-card--incoming .clearstock-kpi-title {
+  color: #075985;
+}
+.clearstock-kpi-card--incoming .clearstock-kpi-value {
+  color: #0369a1;
+}
+.clearstock-kpi-card--incoming .clearstock-kpi-footer {
+  color: #0369a1;
+}
+.clearstock-kpi-card--incoming .clearstock-kpi-active-pill {
+  background-color: #bae6fd;
+  color: #0369a1;
+}
+
+/* 3. Active Catalog SKUs (System Base - Cool Slate Gradient) */
+.clearstock-kpi-card--catalog {
+  --kpi-active-ring: #475569;
+  --kpi-shadow: rgba(71, 85, 105, 0.22);
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 55%, #e2e8f0 120%);
+  border-color: #cbd5e1;
+}
+.clearstock-kpi-card--catalog:hover {
+  border-color: #94a3b8;
+  box-shadow: 0 6px 18px -3px rgba(15, 23, 42, 0.12);
+}
+.clearstock-kpi-card--catalog .clearstock-kpi-icon-badge {
+  background-color: #e2e8f0;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+}
+.clearstock-kpi-card--catalog .clearstock-kpi-title {
+  color: #334155;
+}
+.clearstock-kpi-card--catalog .clearstock-kpi-value {
+  color: #0f172a;
+}
+.clearstock-kpi-card--catalog .clearstock-kpi-footer {
+  color: #475569;
+}
+.clearstock-kpi-card--catalog .clearstock-kpi-active-pill {
+  background-color: #cbd5e1;
+  color: #1e293b;
+}
+
+/* 4. Overstocked (Dead Capital Alert - Warm Honey Amber Gradient) */
+.clearstock-kpi-card--overstocked {
+  --kpi-active-ring: #d97706;
+  --kpi-shadow: rgba(217, 119, 6, 0.25);
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 55%, #fde68a 120%);
+  border-color: #fde68a;
+}
+.clearstock-kpi-card--overstocked:hover {
+  border-color: #fcd34d;
+  box-shadow: 0 6px 18px -3px rgba(217, 119, 6, 0.18);
+}
+.clearstock-kpi-card--overstocked .clearstock-kpi-icon-badge {
+  background-color: #fef3c7;
+  color: #d97706;
+  border: 1px solid #fde68a;
+}
+.clearstock-kpi-card--overstocked .clearstock-kpi-title {
+  color: #92400e;
+}
+.clearstock-kpi-card--overstocked .clearstock-kpi-value {
+  color: #92400e;
+}
+.clearstock-kpi-card--overstocked .clearstock-kpi-footer {
+  color: #b45309;
+}
+.clearstock-kpi-card--overstocked .clearstock-kpi-active-pill {
+  background-color: #fde68a;
+  color: #78350f;
+}
+
+/* Common KPI Card Elements */
+.clearstock-kpi-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.clearstock-kpi-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clearstock-kpi-icon-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.clearstock-kpi-icon-badge svg {
+  width: 16px;
+  height: 16px;
+}
+
+.clearstock-kpi-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.clearstock-kpi-value {
+  font-size: 26px;
+  font-weight: 750;
+  line-height: 1.15;
+  margin: 2px 0 6px 0;
+  letter-spacing: -0.02em;
+}
+
+.clearstock-kpi-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.clearstock-kpi-action-hint {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.85;
+  white-space: nowrap;
+  margin-left: 6px;
+}
+
+.clearstock-kpi-active-pill {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  border-radius: 12px;
+}
+
+/* ==========================================================================
+   Table Action Buttons & Status Tabs (IndexFilters Customization)
+   Vibrant, color-coded action buttons instead of sterile monochrome white
+   ========================================================================== */
+.Polaris-IndexFilters {
+  background-color: #f8fafc !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+}
+
+.Polaris-IndexFilters .Polaris-Tabs__Wrapper {
+  padding: 8px 12px !important;
+}
+
+.Polaris-IndexFilters .Polaris-Tabs {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+}
+
+.Polaris-IndexFilters .Polaris-Tabs__TabContainer {
+  margin: 0 !important;
+}
+
+.Polaris-IndexFilters .Polaris-Tabs__Tab,
+.Polaris-IndexFilters button[role="tab"] {
+  border-radius: 24px !important;
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  padding: 6px 14px !important;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  cursor: pointer !important;
+  outline: none !important;
+  border: 1px solid transparent !important;
+}
+
+/* Hide default underline bar */
+.Polaris-IndexFilters .Polaris-Tabs__Tab::before,
+.Polaris-IndexFilters .Polaris-Tabs__Tab::after,
+.Polaris-IndexFilters button[role="tab"]::before,
+.Polaris-IndexFilters button[role="tab"]::after {
+  display: none !important;
+}
+
+/* Tab 1: All Items (Slate / Neutral Base) */
+#tab-all.Polaris-Tabs__Tab,
+button[id="tab-all"] {
+  background-color: #f1f5f9 !important;
+  border-color: #cbd5e1 !important;
+  color: #334155 !important;
+}
+#tab-all.Polaris-Tabs__Tab:hover,
+button[id="tab-all"]:hover {
+  background-color: #e2e8f0 !important;
+  border-color: #94a3b8 !important;
+  transform: translateY(-1px);
+}
+#tab-all.Polaris-Tabs__Tab--selected,
+button[id="tab-all"][aria-selected="true"] {
+  background-color: #1e293b !important;
+  border-color: #0f172a !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.28) !important;
+}
+#tab-all .Polaris-Badge,
+#tab-all .Polaris-Tabs__Badge span,
+button[id="tab-all"] .Polaris-Badge {
+  background-color: #e2e8f0 !important;
+  color: #1e293b !important;
+  font-weight: 700 !important;
+}
+#tab-all.Polaris-Tabs__Tab--selected .Polaris-Badge,
+#tab-all.Polaris-Tabs__Tab--selected .Polaris-Tabs__Badge span,
+button[id="tab-all"][aria-selected="true"] .Polaris-Badge {
+  background-color: rgba(255, 255, 255, 0.28) !important;
+  color: #ffffff !important;
+}
+
+/* Tab 2: Reorder Now (Urgent Crimson / Rose) */
+#tab-reorder.Polaris-Tabs__Tab,
+button[id="tab-reorder"] {
+  background-color: #fff1f2 !important;
+  border-color: #fecdd3 !important;
+  color: #be123c !important;
+}
+#tab-reorder.Polaris-Tabs__Tab:hover,
+button[id="tab-reorder"]:hover {
+  background-color: #ffe4e6 !important;
+  border-color: #fda4af !important;
+  transform: translateY(-1px);
+}
+#tab-reorder.Polaris-Tabs__Tab--selected,
+button[id="tab-reorder"][aria-selected="true"] {
+  background-color: #e11d48 !important;
+  border-color: #be123c !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 10px rgba(225, 29, 72, 0.35) !important;
+}
+#tab-reorder .Polaris-Badge,
+#tab-reorder .Polaris-Tabs__Badge span,
+button[id="tab-reorder"] .Polaris-Badge {
+  background-color: #ffe4e6 !important;
+  color: #9f1239 !important;
+  font-weight: 700 !important;
+}
+#tab-reorder.Polaris-Tabs__Tab--selected .Polaris-Badge,
+#tab-reorder.Polaris-Tabs__Tab--selected .Polaris-Tabs__Badge span,
+button[id="tab-reorder"][aria-selected="true"] .Polaris-Badge {
+  background-color: rgba(255, 255, 255, 0.28) !important;
+  color: #ffffff !important;
+}
+
+/* Tab 3: Incoming (Logistics Azure / Sky) */
+#tab-incoming.Polaris-Tabs__Tab,
+button[id="tab-incoming"] {
+  background-color: #f0f9ff !important;
+  border-color: #bae6fd !important;
+  color: #0369a1 !important;
+}
+#tab-incoming.Polaris-Tabs__Tab:hover,
+button[id="tab-incoming"]:hover {
+  background-color: #e0f2fe !important;
+  border-color: #7dd3fc !important;
+  transform: translateY(-1px);
+}
+#tab-incoming.Polaris-Tabs__Tab--selected,
+button[id="tab-incoming"][aria-selected="true"] {
+  background-color: #0284c7 !important;
+  border-color: #0369a1 !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 10px rgba(2, 132, 199, 0.35) !important;
+}
+#tab-incoming .Polaris-Badge,
+#tab-incoming .Polaris-Tabs__Badge span,
+button[id="tab-incoming"] .Polaris-Badge {
+  background-color: #e0f2fe !important;
+  color: #0369a1 !important;
+  font-weight: 700 !important;
+}
+#tab-incoming.Polaris-Tabs__Tab--selected .Polaris-Badge,
+#tab-incoming.Polaris-Tabs__Tab--selected .Polaris-Tabs__Badge span,
+button[id="tab-incoming"][aria-selected="true"] .Polaris-Badge {
+  background-color: rgba(255, 255, 255, 0.28) !important;
+  color: #ffffff !important;
+}
+
+/* Tab 4: Overstocked (Dead Capital Warm Amber) */
+#tab-overstocked.Polaris-Tabs__Tab,
+button[id="tab-overstocked"] {
+  background-color: #fffbeb !important;
+  border-color: #fde68a !important;
+  color: #92400e !important;
+}
+#tab-overstocked.Polaris-Tabs__Tab:hover,
+button[id="tab-overstocked"]:hover {
+  background-color: #fef3c7 !important;
+  border-color: #fcd34d !important;
+  transform: translateY(-1px);
+}
+#tab-overstocked.Polaris-Tabs__Tab--selected,
+button[id="tab-overstocked"][aria-selected="true"] {
+  background-color: #d97706 !important;
+  border-color: #b45309 !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 10px rgba(217, 119, 6, 0.35) !important;
+}
+#tab-overstocked .Polaris-Badge,
+#tab-overstocked .Polaris-Tabs__Badge span,
+button[id="tab-overstocked"] .Polaris-Badge {
+  background-color: #fef3c7 !important;
+  color: #92400e !important;
+  font-weight: 700 !important;
+}
+#tab-overstocked.Polaris-Tabs__Tab--selected .Polaris-Badge,
+#tab-overstocked.Polaris-Tabs__Tab--selected .Polaris-Tabs__Badge span,
+button[id="tab-overstocked"][aria-selected="true"] .Polaris-Badge {
+  background-color: rgba(255, 255, 255, 0.28) !important;
+  color: #ffffff !important;
+}
+
+/* Tab 5: Stock OK (Healthy Emerald Green) */
+#tab-ok.Polaris-Tabs__Tab,
+button[id="tab-ok"] {
+  background-color: #f0fdf4 !important;
+  border-color: #bbf7d0 !important;
+  color: #15803d !important;
+}
+#tab-ok.Polaris-Tabs__Tab:hover,
+button[id="tab-ok"]:hover {
+  background-color: #dcfce7 !important;
+  border-color: #86efac !important;
+  transform: translateY(-1px);
+}
+#tab-ok.Polaris-Tabs__Tab--selected,
+button[id="tab-ok"][aria-selected="true"] {
+  background-color: #16a34a !important;
+  border-color: #15803d !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 10px rgba(22, 163, 74, 0.35) !important;
+}
+#tab-ok .Polaris-Badge,
+#tab-ok .Polaris-Tabs__Badge span,
+button[id="tab-ok"] .Polaris-Badge {
+  background-color: #dcfce7 !important;
+  color: #166534 !important;
+  font-weight: 700 !important;
+}
+#tab-ok.Polaris-Tabs__Tab--selected .Polaris-Badge,
+#tab-ok.Polaris-Tabs__Tab--selected .Polaris-Tabs__Badge span,
+button[id="tab-ok"][aria-selected="true"] .Polaris-Badge {
+  background-color: rgba(255, 255, 255, 0.28) !important;
+  color: #ffffff !important;
+}
+
