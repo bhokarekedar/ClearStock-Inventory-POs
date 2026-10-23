@@ -108,6 +108,8 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         day: "numeric",
         year: "numeric",
       }),
+      destinationLocationId: (po as any).destinationLocationId || "",
+      destinationLocationName: (po as any).destinationLocationName || "",
       items: po.items.map((item) => {
         return {
           id: item.id,
@@ -236,6 +238,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         ? locationsList.find((l: any) => l.id === requestedLocationId && l.isActive) || primaryLocation
         : primaryLocation;
       const targetLocationId = targetLocation?.id;
+
+      if (targetLocation) {
+        await prisma.purchaseOrder.update({
+          where: { id: targetPo.id },
+          data: {
+            destinationLocationId: targetLocation.id,
+            destinationLocationName: targetLocation.name,
+          },
+        });
+      }
 
       if (targetLocationId) {
         const changes: Array<{ inventoryItemId: string; locationId: string; delta: number }> = [];
@@ -555,7 +567,14 @@ export default function PurchaseOrderDetailsAndReceiving() {
           ? `Warehouse Receiving Dock • Inspect & Receive Stock • ${carrier}`
           : `In-Transit Order • Expected Arrival: ${po.expectedArrival || "TBD"} • ${carrier}`
       }
-      titleMetadata={<Badge tone={statusBadgeTone}>{statusBadgeText}</Badge>}
+      titleMetadata={
+        <InlineStack gap="200" blockAlign="center">
+          <Badge tone={statusBadgeTone}>{statusBadgeText}</Badge>
+          {(po.destinationLocationName || (locations && locations.find((l: any) => l.isPrimary)?.name)) && (
+            <Badge tone="info">{`📍 ${po.destinationLocationName || locations.find((l: any) => l.isPrimary)?.name || ""}`}</Badge>
+          )}
+        </InlineStack>
+      }
       primaryAction={
         isDraft
           ? {
@@ -785,7 +804,11 @@ export default function PurchaseOrderDetailsAndReceiving() {
         {isReceived && (
           <Banner title="Purchase Order Completed & Closed" tone="success">
             <Text as="p" variant="bodyMd">
-              All <strong>{metrics.totalOrderedUnits} units</strong> have been received at the loading dock and committed to stock. This order is officially closed.
+              All <strong>{metrics.totalOrderedUnits} units</strong> have been received at the loading dock and committed to stock.
+              {po.destinationLocationName && (
+                <> Stock was credited directly to <strong>📍 {po.destinationLocationName}</strong> in Shopify.</>
+              )}
+              {" "}This order is officially closed.
             </Text>
           </Banner>
         )}
@@ -1182,6 +1205,15 @@ export default function PurchaseOrderDetailsAndReceiving() {
                       </Text>
                       <Text as="span" variant="bodySm">
                         {po.expectedArrival || "In transit"}
+                      </Text>
+                    </InlineStack>
+
+                    <InlineStack align="space-between">
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Destination Warehouse:
+                      </Text>
+                      <Text as="span" variant="bodySm" fontWeight="semibold">
+                        📍 {po.destinationLocationName || (locations && locations.find((l: any) => l.isPrimary)?.name) || "Primary Location"}
                       </Text>
                     </InlineStack>
 

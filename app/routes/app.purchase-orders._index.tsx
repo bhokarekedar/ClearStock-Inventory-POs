@@ -31,6 +31,7 @@ export interface POListingItem {
   totalUnits: number;
   totalCost: number;
   expectedArrival: string;
+  destinationLocation?: string | null;
   createdAt: string;
 }
 
@@ -133,6 +134,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       totalUnits,
       totalCost,
       expectedArrival: expectedArrivalStr,
+      destinationLocation: (po as any).destinationLocationName || null,
       createdAt: createdAtStr,
     };
   });
@@ -254,8 +256,13 @@ export default function PurchaseOrdersPage() {
                   </IndexTable.Cell>
 
                   <IndexTable.Cell>
-                    <div style={{ minWidth: "140px" }}>
-                      <Badge tone={po.badgeTone}>{po.status}</Badge>
+                    <div style={{ minWidth: "160px" }}>
+                      <InlineStack gap="150" blockAlign="center" wrap>
+                        <Badge tone={po.badgeTone}>{po.status}</Badge>
+                        {po.destinationLocation && (
+                          <Badge tone="info">{`📍 ${po.destinationLocation}`}</Badge>
+                        )}
+                      </InlineStack>
                     </div>
                   </IndexTable.Cell>
 

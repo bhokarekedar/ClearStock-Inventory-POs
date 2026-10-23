@@ -105,10 +105,12 @@ model PurchaseOrder {
   supplier        Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
   status          PurchaseOrderStatus @default(DRAFT)
   expectedArrival DateTime?
-  notes           String?
-  items           PurchaseOrderItem[]
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  notes                   String?
+  destinationLocationId   String?
+  destinationLocationName String?
+  items                   PurchaseOrderItem[]
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
 
   @@unique([shop, poNumber])
   @@index([shop, status])

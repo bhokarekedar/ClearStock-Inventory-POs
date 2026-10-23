@@ -669,7 +669,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   // 1. Fetch Suppliers
@@ -716,7 +716,65 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
   const openPoItems = openPurchaseOrders.flatMap((po) => po.items);
 
-  // 6. Map PostgreSQL records to ReplenishmentItem entities
+  // 6. Query multi-location warehouse breakdown from Shopify GraphQL
+  let storeLocations: Array<{ id: string; name: string; isPrimary: boolean; isActive: boolean }> = [];
+  const locationStockMap: Record<string, Array<{ locationId: string; locationName: string; available: number }>> = {};
+
+  try {
+    const locRes = await admin.graphql(`
+      query GetLocationsAndStock {
+        locations(first: 20) {
+          nodes {
+            id
+            name
+            isPrimary
+            isActive
+          }
+        }
+        productVariants(first: 50) {
+          nodes {
+            id
+            inventoryItem {
+              id
+              inventoryLevels(first: 20) {
+                nodes {
+                  location {
+                    id
+                    name
+                    isActive
+                  }
+                  quantities(names: ["available"]) {
+                    name
+                    quantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `);
+    const locJson: any = await locRes.json();
+    storeLocations = (locJson.data?.locations?.nodes || []).filter((l: any) => l.isActive);
+    for (const vNode of locJson.data?.productVariants?.nodes || []) {
+      const vLevels: Array<{ locationId: string; locationName: string; available: number }> = [];
+      for (const lvl of vNode.inventoryItem?.inventoryLevels?.nodes || []) {
+        if (lvl.location?.isActive) {
+          const qty = lvl.quantities?.find((q: any) => !q.name || q.name === "available")?.quantity ?? 0;
+          vLevels.push({
+            locationId: lvl.location.id,
+            locationName: lvl.location.name,
+            available: qty,
+          });
+        }
+      }
+      locationStockMap[vNode.id] = vLevels;
+    }
+  } catch (locErr) {
+    console.warn("[Dashboard Locations Query Warning]", locErr);
+  }
+
+  // 7. Map PostgreSQL records to ReplenishmentItem entities
   const items: ReplenishmentItem[] = rulesDb.map((rule) => {
     const variantSales = salesDb.filter((s) => s.variantId === rule.variantId);
     const unitsSold7d = variantSales
@@ -773,6 +831,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       packSize: rule.packSize,
       unitCost: Number(rule.unitCost),
       lastSyncDate: "Synced with Shopify",
+      locationStock: locationStockMap[rule.variantId] || [],
     };
   });
 
@@ -797,6 +856,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     items,
+    storeLocations,
     suppliers: suppliersDb.map((s) => ({
       id: s.id,
       name: s.name,
@@ -848,6 +908,7 @@ export interface ReplenishmentItem {
   packSize: number; // Case/box multiple
   unitCost: number;
   lastSyncDate: string;
+  locationStock?: Array<{ locationId: string; locationName: string; available: number }>;
 }
 
 export function computeReplenishmentMath(
@@ -1039,6 +1100,7 @@ export default function ReplenishmentDashboard() {
 
   // Dashboard Filters & Controls
   const [selectedSupplier, setSelectedSupplier] = useState<string>("all");
+  const [selectedLocation, setSelectedLocation] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [rollingWindow, setRollingWindow] = useState<"7" | "14" | "30" | "90">(() => {
     if (loaderData?.selectedPlan === "starter") return "30";
@@ -1047,6 +1109,20 @@ export default function ReplenishmentDashboard() {
   const [filterStatus, setFilterStatus] = useState<
     "all" | "Reorder Now" | "Overstocked" | "Incoming" | "Stock OK"
   >("all");
+
+  const selectedPlan = (loaderData?.selectedPlan as string) || "growth";
+  const storeLocations = (loaderData as any)?.storeLocations || [];
+
+  const locationOptions = useMemo(() => {
+    const list = [{ label: "All Locations (Aggregated)", value: "all" }];
+    (storeLocations || []).forEach((loc: any) => {
+      list.push({
+        label: `${loc.name}${loc.isPrimary ? " (Primary)" : ""}${selectedPlan !== "scale" ? " 🔒" : ""}`,
+        value: loc.id,
+      });
+    });
+    return list;
+  }, [storeLocations, selectedPlan]);
 
   const isSyncingCatalog =
     navigation.state === "submitting" &&
@@ -1113,7 +1189,6 @@ export default function ReplenishmentDashboard() {
   const [mathModalTab, setMathModalTab] = useState<"story" | "formula">("story");
   const windowDaysNum = parseInt(rollingWindow, 10) as 7 | 14 | 30 | 90;
 
-  const selectedPlan = (loaderData?.selectedPlan as string) || "growth";
   const rawSafetyFormulaModel = (loaderData as any)?.safetyFormulaModel || "standard";
   // Scale Plan gate: custom safety formula models only apply to Scale tier
   const effectiveSafetyFormulaModel = selectedPlan === "scale" ? rawSafetyFormulaModel : "standard";
@@ -1147,11 +1222,26 @@ export default function ReplenishmentDashboard() {
 
   // Process rows with calculations
   const calculatedRows = useMemo(() => {
-    return activeItems.map((item) => ({
-      ...item,
-      calc: computeReplenishmentMath(item, windowDaysNum, 30, effectiveSafetyFormulaModel),
-    }));
-  }, [activeItems, windowDaysNum, effectiveSafetyFormulaModel]);
+    return activeItems.map((item) => {
+      // If a specific warehouse location is selected on Scale Plan, calculate replenishment specifically for that location
+      const effectiveStockOnHand =
+        selectedLocation === "all"
+          ? item.stockOnHand
+          : (item.locationStock?.find((l) => l.locationId === selectedLocation)?.available ?? 0);
+
+      const itemForMath = {
+        ...item,
+        stockOnHand: effectiveStockOnHand,
+      };
+
+      return {
+        ...item,
+        effectiveStockOnHand,
+        originalStockOnHand: item.stockOnHand,
+        calc: computeReplenishmentMath(itemForMath, windowDaysNum, 30, effectiveSafetyFormulaModel),
+      };
+    });
+  }, [activeItems, windowDaysNum, effectiveSafetyFormulaModel, selectedLocation]);
 
   // Filtered rows for Dashboard
   const filteredRows = useMemo(() => {
@@ -1278,6 +1368,7 @@ export default function ReplenishmentDashboard() {
 
   const handleClearAll = () => {
     setSelectedSupplier("all");
+    setSelectedLocation("all");
     setRollingWindow(loaderData?.defaultLookbackWindow || "30");
     setSearchQuery("");
     setFilterStatus("all");
@@ -1289,6 +1380,7 @@ export default function ReplenishmentDashboard() {
   const hasActiveFilters =
     filterStatus !== "all" ||
     selectedSupplier !== "all" ||
+    selectedLocation !== "all" ||
     searchQuery.trim().length > 0 ||
     isLookbackChanged;
 
@@ -1414,7 +1506,18 @@ export default function ReplenishmentDashboard() {
   };
 
   const activeMath = activeMathItem
-    ? computeReplenishmentMath(activeMathItem, windowDaysNum, 30, effectiveSafetyFormulaModel)
+    ? computeReplenishmentMath(
+        selectedLocation !== "all"
+          ? {
+              ...activeMathItem,
+              stockOnHand:
+                activeMathItem.locationStock?.find((l) => l.locationId === selectedLocation)?.available ?? 0,
+            }
+          : activeMathItem,
+        windowDaysNum,
+        30,
+        effectiveSafetyFormulaModel,
+      )
     : null;
 
   return (
@@ -2549,6 +2652,26 @@ export default function ReplenishmentDashboard() {
                         onChange={(val) => setSelectedSupplier(val)}
                       />
                     </div>
+
+                    {storeLocations && storeLocations.length > 0 && (
+                      <div style={{ minWidth: "210px" }}>
+                        <Select
+                          label="Warehouse"
+                          labelInline
+                          options={locationOptions}
+                          value={selectedLocation}
+                          onChange={(val) => {
+                            if (selectedPlan !== "scale" && val !== "all") {
+                              shopify.toast.show(
+                                "Multi-Warehouse inventory filtering is a Scale Plan feature ($89/mo). Upgrade in Settings.",
+                              );
+                              return;
+                            }
+                            setSelectedLocation(val);
+                          }}
+                        />
+                      </div>
+                    )}
                   </InlineStack>
 
                   {/* Right Controls: Sales Lookback Window */}
@@ -2608,6 +2731,14 @@ export default function ReplenishmentDashboard() {
                           Supplier:{" "}
                           {supplierOptions.find((s) => s.value === selectedSupplier)?.label ||
                             selectedSupplier}
+                        </Tag>
+                      )}
+
+                      {selectedLocation !== "all" && (
+                        <Tag onRemove={() => setSelectedLocation("all")}>
+                          Warehouse:{" "}
+                          {locationOptions.find((l) => l.value === selectedLocation)?.label ||
+                            selectedLocation}
                         </Tag>
                       )}
 
@@ -2788,13 +2919,38 @@ export default function ReplenishmentDashboard() {
                         {/* 4. Stock on Hand */}
                         <IndexTable.Cell>
                           <Tooltip
-                            content={`What's left: You have ${row.stockOnHand.toLocaleString()} units available. Selling ${calc.ads.toFixed(1)} per day, this will last roughly ${calc.daysOfCoverageOnHand} days before you run out.`}
+                            content={
+                              <div style={{ padding: "4px" }}>
+                                <div style={{ fontWeight: 600, marginBottom: "4px" }}>
+                                  Stock Breakdown by Location:
+                                </div>
+                                {row.locationStock && row.locationStock.length > 0 ? (
+                                  row.locationStock.map((ls) => (
+                                    <div key={ls.locationId} style={{ fontSize: "12px", marginTop: "2px" }}>
+                                      • <strong>{ls.locationName}:</strong> {ls.available.toLocaleString()} units
+                                    </div>
+                                  ))
+                                ) : (
+                                  <div>{row.stockOnHand} units across your store</div>
+                                )}
+                                <div style={{ marginTop: "6px", fontSize: "11px", opacity: 0.85, borderTop: "1px solid rgba(255,255,255,0.2)", paddingTop: "4px" }}>
+                                  Selling {calc.ads.toFixed(1)}/day • {calc.daysOfCoverageOnHand}d runway
+                                </div>
+                              </div>
+                            }
                             dismissOnMouseOut
                           >
                             <div style={{ cursor: "help" }}>
-                              <Text as="span" variant="bodySm" fontWeight="bold">
-                                {row.stockOnHand.toLocaleString()}
-                              </Text>
+                              <InlineStack gap="100" blockAlign="center">
+                                <Text as="span" variant="bodySm" fontWeight="bold">
+                                  {calc.stockOnHand.toLocaleString()}
+                                </Text>
+                                {selectedLocation !== "all" && (
+                                  <Badge size="small" tone="info">
+                                    Filtered
+                                  </Badge>
+                                )}
+                              </InlineStack>
                               <Text as="p" variant="bodyXs" tone="subdued">
                                 {calc.daysOfCoverageOnHand > 0
                                   ? `${calc.daysOfCoverageOnHand}d runway`
@@ -3228,6 +3384,50 @@ export default function ReplenishmentDashboard() {
                               ? ` + ${activeMath.stockOnOrder} units in transit on open POs = ${activeMath.effectiveStock} total units available.`
                               : "."}
                           </Text>
+
+                          {activeMathItem.locationStock && activeMathItem.locationStock.length > 0 && (
+                            <div
+                              style={{
+                                background: "#f8fafc",
+                                border: "1px solid #e2e8f0",
+                                borderRadius: "8px",
+                                padding: "10px 14px",
+                                marginTop: "6px",
+                                marginBottom: "6px",
+                              }}
+                            >
+                              <InlineStack align="space-between" blockAlign="center">
+                                <Text as="p" variant="bodySm" fontWeight="bold">
+                                  📍 Warehouse Stock Breakdown:
+                                </Text>
+                                <Badge tone="info" size="small">
+                                  {`${activeMathItem.locationStock.length} Locations`}
+                                </Badge>
+                              </InlineStack>
+                              <div style={{ marginTop: "6px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                                {activeMathItem.locationStock.map((loc) => (
+                                  <div
+                                    key={loc.locationId}
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "center",
+                                      fontSize: "13px",
+                                      padding: "3px 0",
+                                      borderBottom: "1px dashed #e2e8f0",
+                                    }}
+                                  >
+                                    <span style={{ color: "#334155" }}>
+                                      🏬 <strong>{loc.locationName}</strong>
+                                    </span>
+                                    <span style={{ fontWeight: 600, color: "#0f172a" }}>
+                                      {loc.available.toLocaleString()} units
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
 
                           {activeMath.isBelowReorderPoint ? (
                             <BlockStack gap="150">

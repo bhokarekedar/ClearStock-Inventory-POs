@@ -100,7 +100,10 @@ flowchart LR
   - *Healthy Stock* (optimally balanced runway).
   - *Total Dead Capital Trapped* (capital eligible for liquidation/clearance).
 - **Interactive Velocity Toggles:** Switch between 7D (spike detection), 14D (bi-weekly trend), 30D (standard baseline), and 90D (macro seasonality).
-- **Mathematical Inspector Modal:** Click **Inspect** on any product to see step-by-step audit calculations, formula multipliers, and exact carton rounding breakdowns.
+- **Warehouse Selector Filter (Scale Plan):** Toggle between enterprise aggregate views (`All Locations`) or filter replenishment calculations specifically for a single warehouse (e.g. *Main 3PL* vs *Retail Storefront*).
+- **Per-Location Stock Breakdown:**
+  - **Hover Tooltip:** Instant popover on the *Stock on Hand* table cell revealing available units across every facility.
+  - **Math Inspector Modal:** Click **Inspect** on any product to see step-by-step audit calculations, formula multipliers, exact carton rounding, and a dedicated **📍 Warehouse Stock Breakdown** card.
 - **Bulk Purchase Order Generation:** Select multiple low-stock SKUs and click **Create Purchase Order**. The system automatically groups items by vendor and generates dedicated POs.
 
 ### 4.2 Supplier & Sourcing Management (`/app/suppliers`)
@@ -120,12 +123,13 @@ flowchart LR
   - `PARTIALLY_RECEIVED`: Allows recording partial shipments with tracking of outstanding balances.
   - `RECEIVED`: Completed order; final stock credited to Shopify inventory.
   - `CANCELLED`: Voids the order and releases on-order stock reservations.
+- **Permanent Destination Warehouse Tracking:** Every received order records the destination facility name and ID, displaying location badges in the PO listing table and header (`📍 My Custom Location`).
 - **Supplier PO Email & Print:** Export formal supplier-ready purchase order summaries with itemized costs, order numbers, and contact details.
 
 ### 4.4 Two-Way Multi-Location Warehouse Receiving (`/app/purchase-orders/:id`)
 - **Shopify GraphQL Live Sync:** Clicking **Receive Items** triggers Shopify's Admin GraphQL mutation `inventoryAdjustQuantities`.
 - **Destination Warehouse Selection (Scale Plan):** Merchants managing multiple Shopify locations can select the exact destination warehouse (e.g. *Main 3PL*, *West Coast Warehouse*, *Retail Storefront*).
-- **Local & Remote Synchronization:** Simultaneously updates Shopify storefront stock levels and local ClearStock database records.
+- **Local & Remote Synchronization:** Simultaneously updates Shopify storefront stock levels, records destination metadata on the PO, and updates local ClearStock database records.
 
 ### 4.5 Settings & Data Sync Engine (`/app/settings`)
 - **Global Replenishment Defaults:** Default lookback windows, baseline safety days, fallback transit lead times, and automated case pack rounding.
@@ -151,7 +155,7 @@ Subscription tiers are enforced via `app/utils/planGatekeeper.ts` with automated
 | **Sales Velocity Windows** | 30D Baseline only | 7D, 14D, 30D, and 90D | 7D, 14D, 30D, and 90D |
 | **Case Pack & MOQ Rounding** | 🔒 Locked | Included | Included |
 | **1-Click Purchase Orders** | Included | Included | Included |
-| **Multi-Location Warehouse Receiving** | Primary Location only | Primary Location only | **Any Shopify Location** |
+| **Multi-Location Warehouse Filtering & Receiving** | Primary Location only | Primary Location only | **Any Shopify Location + Dashboard Filter** |
 | **Custom Safety Stock Formulas** | Standard (1.0x) only | Standard (1.0x) only | **Surge (+25%), Aggressive (+50%), Lean (-20%)** |
 | **Support SLA** | Standard | Standard | **Priority 24/7 SLA** |
 
@@ -229,6 +233,8 @@ erDiagram
         string poNumber
         enum status
         datetime expectedArrival
+        string destinationLocationId
+        string destinationLocationName
     }
 
     PurchaseOrderItem {
