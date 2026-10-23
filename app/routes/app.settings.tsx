@@ -18,6 +18,7 @@ import {
   Divider,
   Badge,
   Modal,
+  Box,
 } from "@shopify/polaris";
 import { RefreshIcon, CheckIcon, DeleteIcon, ExportIcon, ClipboardIcon } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -637,19 +638,23 @@ export default function SettingsPage() {
 
                 <Divider />
 
-                <InlineStack align="space-between" blockAlign="center" wrap>
-                  <Text as="span" variant="bodyXs" tone="subdued">
-                    Changes take effect across your Replenishment dashboard immediately.
-                  </Text>
-                  <Button
-                    variant="primary"
-                    icon={CheckIcon}
-                    loading={isSubmitting}
-                    onClick={handleSave}
-                  >
-                    Save Replenishment Rules & Formula
-                  </Button>
-                </InlineStack>
+                <Box paddingBlockStart="500" paddingBlockEnd="200">
+                  <BlockStack gap="300">
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Changes take effect across your Replenishment dashboard immediately.
+                    </Text>
+                    <InlineStack align="start">
+                      <Button
+                        variant="primary"
+                        icon={CheckIcon}
+                        loading={isSubmitting}
+                        onClick={handleSave}
+                      >
+                        Save Replenishment Rules & Formula
+                      </Button>
+                    </InlineStack>
+                  </BlockStack>
+                </Box>
               </BlockStack>
             </Card>
           </Layout.AnnotatedSection>
