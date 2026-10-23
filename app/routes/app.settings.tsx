@@ -19,7 +19,7 @@ import {
   Badge,
   Modal,
 } from "@shopify/polaris";
-import { RefreshIcon, CheckIcon, DeleteIcon, ExportIcon } from "@shopify/polaris-icons";
+import { RefreshIcon, CheckIcon, DeleteIcon, ExportIcon, ClipboardIcon } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -336,6 +336,29 @@ export default function SettingsPage() {
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showWipeModal, setShowWipeModal] = useState(false);
   const [wipeConfirmText, setWipeConfirmText] = useState("");
+  const [exportDataPayload, setExportDataPayload] = useState<any>(null);
+  const [showExportModal, setShowExportModal] = useState(false);
+
+  // Reliable Blob File Downloader for Shopify App iframes
+  const triggerBlobDownload = (data: any) => {
+    try {
+      const jsonContent = JSON.stringify(data, null, 2);
+      const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8" });
+      const url = window.URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement("a");
+      downloadAnchor.style.display = "none";
+      downloadAnchor.href = url;
+      downloadAnchor.download = `clearstock-data-export-${loaderData.shop.replace(".myshopify.com", "")}-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      setTimeout(() => {
+        document.body.removeChild(downloadAnchor);
+        window.URL.revokeObjectURL(url);
+      }, 400);
+    } catch (e) {
+      console.error("Export download error:", e);
+    }
+  };
 
   // Handle Action Responses
   useEffect(() => {
@@ -346,24 +369,11 @@ export default function SettingsPage() {
       if (actionData.relaunchWizard || actionData.dataWiped) {
         navigate("/app");
       }
-      // Handle browser download for export data
+      // Handle browser download & preview modal for export data
       if (actionData.exportData) {
-        try {
-          const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(
-            JSON.stringify(actionData.exportData, null, 2),
-          )}`;
-          const downloadAnchor = document.createElement("a");
-          downloadAnchor.setAttribute("href", jsonString);
-          downloadAnchor.setAttribute(
-            "download",
-            `clearstock-data-export-${loaderData.shop.replace(".myshopify.com", "")}-${new Date().toISOString().slice(0, 10)}.json`,
-          );
-          document.body.appendChild(downloadAnchor);
-          downloadAnchor.click();
-          downloadAnchor.remove();
-        } catch (e) {
-          console.error("Export download error:", e);
-        }
+        setExportDataPayload(actionData.exportData);
+        setShowExportModal(true);
+        triggerBlobDownload(actionData.exportData);
       }
     } else if (actionData?.error) {
       shopify.toast.show(actionData.error, { isError: true });
@@ -506,19 +516,19 @@ export default function SettingsPage() {
           <Layout.AnnotatedSection
             id="data-sync"
             title="Shopify Data Sync & Health"
-            description="Manage PostgreSQL ledger synchronization and manually verify local sales records against Shopify."
+            description="Manage real-time data synchronization and manually verify local sales records against Shopify."
           >
             <Card>
               <BlockStack gap="300">
                 <Banner tone="success">
                   <Text as="p" variant="bodyMd">
-                    PostgreSQL caching engine active. Replenishment calculations execute locally with sub-second latency.
+                    High-speed sync engine active. Replenishment calculations execute with real-time speed.
                   </Text>
                 </Banner>
 
                 <BlockStack gap="100">
                   <Text as="p" variant="bodySm">
-                    <strong>Local Ledger:</strong> {stats.trackedSkus} tracked SKUs • {stats.suppliersCount} suppliers • {stats.poCount} purchase orders • {stats.salesLedgerRows.toLocaleString()} daily sales records.
+                    <strong>Synced Records:</strong> {stats.trackedSkus} tracked SKUs • {stats.suppliersCount} suppliers • {stats.poCount} purchase orders • {stats.salesLedgerRows.toLocaleString()} daily sales records.
                   </Text>
                   <Text as="p" variant="bodySm" tone="subdued">
                     Store domain: {loaderData.shop}
@@ -629,6 +639,9 @@ export default function SettingsPage() {
             </Card>
           </Layout.AnnotatedSection>
         </Layout>
+
+        {/* Bottom spacing below Danger Zone */}
+        <div style={{ paddingBottom: "64px" }} />
       </BlockStack>
 
       {/* Wipe Confirmation Modal */}
@@ -675,6 +688,77 @@ export default function SettingsPage() {
               placeholder="WIPE"
               autoComplete="off"
             />
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
+
+      {/* Export Data Archive Modal */}
+      <Modal
+        open={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        title="📦 ClearStock Data Archive (.JSON)"
+        primaryAction={{
+          content: "Download JSON File",
+          icon: ExportIcon,
+          onAction: () => {
+            if (exportDataPayload) triggerBlobDownload(exportDataPayload);
+          },
+        }}
+        secondaryActions={[
+          {
+            content: "Copy JSON",
+            icon: ClipboardIcon,
+            onAction: () => {
+              if (exportDataPayload) {
+                navigator.clipboard.writeText(JSON.stringify(exportDataPayload, null, 2));
+                shopify.toast.show("JSON copied to clipboard!");
+              }
+            },
+          },
+          {
+            content: "Close",
+            onAction: () => setShowExportModal(false),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="400">
+            <Banner tone="info">
+              <p>
+                This archive contains your complete ClearStock configuration. ClearStock stores <strong>zero customer PII</strong>; sales data is strictly aggregated by variant ID and calendar date.
+              </p>
+            </Banner>
+
+            {exportDataPayload?.statistics && (
+              <InlineStack gap="200" wrap>
+                <Badge tone="info">{`${exportDataPayload.statistics.totalSourcingRules || 0} Tracked SKUs`}</Badge>
+                <Badge tone="info">{`${exportDataPayload.statistics.totalSuppliers || 0} Suppliers`}</Badge>
+                <Badge tone="info">{`${exportDataPayload.statistics.totalPurchaseOrders || 0} Purchase Orders`}</Badge>
+                <Badge tone="info">{`${exportDataPayload.statistics.totalDailySalesRows || 0} Sales Ledger Rows`}</Badge>
+              </InlineStack>
+            )}
+
+            <BlockStack gap="200">
+              <Text as="p" variant="bodySm" fontWeight="bold">
+                Export Preview (Raw JSON):
+              </Text>
+              <pre
+                style={{
+                  maxHeight: "220px",
+                  overflowY: "auto",
+                  backgroundColor: "#f4f6f8",
+                  padding: "12px",
+                  borderRadius: "8px",
+                  fontSize: "11px",
+                  fontFamily: "monospace",
+                  border: "1px solid #dcdfe4",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-all",
+                }}
+              >
+                {exportDataPayload ? JSON.stringify(exportDataPayload, null, 2) : "Loading..."}
+              </pre>
+            </BlockStack>
           </BlockStack>
         </Modal.Section>
       </Modal>

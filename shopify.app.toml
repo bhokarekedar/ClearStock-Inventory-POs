@@ -65,6 +65,14 @@ api_version = "2025-01"
   uri = "/webhooks/inventory_levels/update"
   topics = [ "inventory_levels/update" ]
 
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/create"
+  topics = [ "orders/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/updated"
+  topics = [ "orders/updated" ]
+
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]
 
