@@ -1231,6 +1231,14 @@ export default function ReplenishmentDashboard() {
         viewMode === "dashboard"
           ? [
               {
+                content: "How Calculations Work",
+                icon: InfoIcon,
+                onAction: () => {
+                  setGuideDefaultTab("math");
+                  setShowGuideModal(true);
+                },
+              },
+              {
                 content: "Sync with Shopify",
                 icon: RefreshIcon,
                 loading: isSyncingCatalog,
@@ -2144,53 +2152,41 @@ export default function ReplenishmentDashboard() {
                     </div>
                   </InlineStack>
 
-                  {/* Right Controls: Sales Lookback Window + How Calculations Work */}
-                  <InlineStack gap="300" blockAlign="center" wrap>
-                    <InlineStack gap="150" blockAlign="center">
-                      <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
-                        Sales Window:
-                      </Text>
-                      <ButtonGroup variant="segmented">
-                        <Button
-                          size="slim"
-                          pressed={rollingWindow === "7"}
-                          onClick={() => setRollingWindow("7")}
-                        >
-                          7D
-                        </Button>
-                        <Button
-                          size="slim"
-                          pressed={rollingWindow === "14"}
-                          onClick={() => setRollingWindow("14")}
-                        >
-                          14D
-                        </Button>
-                        <Button
-                          size="slim"
-                          pressed={rollingWindow === "30"}
-                          onClick={() => setRollingWindow("30")}
-                        >
-                          30D
-                        </Button>
-                        <Button
-                          size="slim"
-                          pressed={rollingWindow === "90"}
-                          onClick={() => setRollingWindow("90")}
-                        >
-                          90D
-                        </Button>
-                      </ButtonGroup>
-                    </InlineStack>
-
-                    <Button
-                      size="slim"
-                      onClick={() => {
-                        setGuideDefaultTab("math");
-                        setShowGuideModal(true);
-                      }}
-                    >
-                      🧮 How Calculations Work
-                    </Button>
+                  {/* Right Controls: Sales Lookback Window */}
+                  <InlineStack gap="150" blockAlign="center">
+                    <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
+                      Sales Window:
+                    </Text>
+                    <ButtonGroup variant="segmented">
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "7"}
+                        onClick={() => setRollingWindow("7")}
+                      >
+                        7D
+                      </Button>
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "14"}
+                        onClick={() => setRollingWindow("14")}
+                      >
+                        14D
+                      </Button>
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "30"}
+                        onClick={() => setRollingWindow("30")}
+                      >
+                        30D
+                      </Button>
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "90"}
+                        onClick={() => setRollingWindow("90")}
+                      >
+                        90D
+                      </Button>
+                    </ButtonGroup>
                   </InlineStack>
                 </InlineStack>
 
