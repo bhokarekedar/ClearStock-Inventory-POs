@@ -42,6 +42,7 @@ import {
   DeliveryIcon,
   ProductIcon,
   CashDollarIcon,
+  EditIcon,
 } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -386,7 +387,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     const name = String(formData.get("name") || "").trim();
+    const contactName = String(formData.get("contactName") || "").trim();
     const email = String(formData.get("email") || "").trim();
+    const phone = String(formData.get("phone") || "").trim();
     const defaultLeadTime = parseInt(String(formData.get("defaultLeadTime") || "14"), 10);
     const currency = String(formData.get("currency") || "USD");
     const notes = String(formData.get("notes") || "").trim();
@@ -397,7 +400,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       data: {
         shop: session.shop,
         name,
+        contactName: contactName || null,
         email: email || null,
+        phone: phone || null,
         defaultLeadTime: isNaN(defaultLeadTime) ? 14 : defaultLeadTime,
         currency,
         notes: notes || null,
@@ -423,6 +428,60 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       supplierCreated: true,
       supplierName: supplier.name,
       supplierId: supplier.id,
+    };
+  }
+
+  // 3b. UPDATE SUPPLIER & LEAD TIME (Step 3 or Dashboard)
+  if (intent === "UPDATE_SUPPLIER") {
+    const supplierId = String(formData.get("supplierId") || formData.get("id") || "").trim();
+    const name = String(formData.get("name") || "").trim();
+    const contactName = String(formData.get("contactName") || "").trim();
+    const email = String(formData.get("email") || "").trim();
+    const phone = String(formData.get("phone") || "").trim();
+    const defaultLeadTime = Math.max(1, parseInt(String(formData.get("defaultLeadTime") || "14"), 10));
+    const currency = String(formData.get("currency") || "USD");
+    const notes = String(formData.get("notes") || "").trim();
+
+    if (!supplierId) return { ok: false, error: "Supplier ID is required." };
+    if (!name) return { ok: false, error: "Supplier name is required." };
+
+    const existing = await prisma.supplier.findFirst({
+      where: { id: supplierId, shop: session.shop },
+    });
+    if (!existing) {
+      return { ok: false, error: "Supplier not found or does not belong to this store." };
+    }
+
+    const updated = await prisma.supplier.update({
+      where: { id: existing.id },
+      data: {
+        name,
+        contactName: contactName || null,
+        email: email || null,
+        phone: phone || null,
+        defaultLeadTime,
+        currency,
+        notes: notes || null,
+      },
+    });
+
+    // Synchronize updated lead time days to all variants assigned to this supplier
+    await prisma.variantSupplierRule.updateMany({
+      where: {
+        shop: session.shop,
+        supplierId: updated.id,
+      },
+      data: {
+        leadTimeDays: updated.defaultLeadTime,
+      },
+    });
+
+    return {
+      ok: true,
+      supplierUpdated: true,
+      supplierName: updated.name,
+      supplierId: updated.id,
+      defaultLeadTime: updated.defaultLeadTime,
     };
   }
 
@@ -741,9 +800,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     suppliers: suppliersDb.map((s) => ({
       id: s.id,
       name: s.name,
+      contactName: s.contactName || "",
       defaultLeadTime: s.defaultLeadTime,
       email: s.email || "",
+      phone: s.phone || "",
       currency: s.currency || "USD",
+      notes: s.notes || "",
     })),
     defaultLookbackWindow: (defaultLookbackWindow === "7" ||
     defaultLookbackWindow === "14" ||
@@ -964,10 +1026,13 @@ export default function ReplenishmentDashboard() {
   const [guideDefaultTab, setGuideDefaultTab] = useState<"math" | "pos" | "sync" | "faqs">("math");
   const [showSupportModal, setShowSupportModal] = useState<boolean>(false);
   const [showSupplierModal, setShowSupplierModal] = useState<boolean>(false);
+  const [editingSupplier, setEditingSupplier] = useState<any | null>(null);
 
-  // New Supplier Form State
+  // Supplier Form State
   const [newSupplierName, setNewSupplierName] = useState("");
+  const [newSupplierContactName, setNewSupplierContactName] = useState("");
   const [newSupplierEmail, setNewSupplierEmail] = useState("");
+  const [newSupplierPhone, setNewSupplierPhone] = useState("");
   const [newSupplierLeadTime, setNewSupplierLeadTime] = useState("14");
   const [newSupplierCurrency, setNewSupplierCurrency] = useState("USD");
   const [newSupplierNotes, setNewSupplierNotes] = useState("");
@@ -995,6 +1060,9 @@ export default function ReplenishmentDashboard() {
   const isAddingSupplier =
     navigation.state === "submitting" &&
     navigation.formData?.get("intent") === "ADD_SUPPLIER";
+  const isUpdatingSupplier =
+    navigation.state === "submitting" &&
+    navigation.formData?.get("intent") === "UPDATE_SUPPLIER";
 
   // Action feedback toasts
   useEffect(() => {
@@ -1009,8 +1077,25 @@ export default function ReplenishmentDashboard() {
     } else if (actionData?.supplierCreated) {
       shopify.toast.show(`Supplier "${actionData.supplierName}" added!`);
       setShowSupplierModal(false);
+      setEditingSupplier(null);
       setNewSupplierName("");
+      setNewSupplierContactName("");
       setNewSupplierEmail("");
+      setNewSupplierPhone("");
+      setNewSupplierLeadTime("14");
+      setNewSupplierNotes("");
+    } else if (actionData?.supplierUpdated) {
+      shopify.toast.show(
+        `Supplier "${actionData.supplierName}" updated! Lead time set to ${actionData.defaultLeadTime} days.`,
+      );
+      setShowSupplierModal(false);
+      setEditingSupplier(null);
+      setNewSupplierName("");
+      setNewSupplierContactName("");
+      setNewSupplierEmail("");
+      setNewSupplierPhone("");
+      setNewSupplierLeadTime("14");
+      setNewSupplierNotes("");
     } else if (actionData?.onboardingCompleted) {
       shopify.toast.show("🎉 Setup completed! Welcome to ClearStock.");
       setViewMode("dashboard");
@@ -1219,21 +1304,68 @@ export default function ReplenishmentDashboard() {
     submit({ intent: "SAVE_PLAN", plan: chosenPlan }, { method: "post" });
   };
 
-  const handleCreateSupplier = (e?: React.FormEvent) => {
+  const handleOpenAddSupplier = () => {
+    setEditingSupplier(null);
+    setNewSupplierName("");
+    setNewSupplierContactName("");
+    setNewSupplierEmail("");
+    setNewSupplierPhone("");
+    setNewSupplierLeadTime("14");
+    setNewSupplierCurrency("USD");
+    setNewSupplierNotes("");
+    setShowSupplierModal(true);
+  };
+
+  const handleOpenEditSupplier = (sup: any) => {
+    setEditingSupplier(sup);
+    setNewSupplierName(sup.name || "");
+    setNewSupplierContactName(sup.contactName || "");
+    setNewSupplierEmail(sup.email || "");
+    setNewSupplierPhone(sup.phone || "");
+    setNewSupplierLeadTime(String(sup.defaultLeadTime || 14));
+    setNewSupplierCurrency(sup.currency || "USD");
+    setNewSupplierNotes(sup.notes || "");
+    setShowSupplierModal(true);
+  };
+
+  const handleSaveSupplier = (e?: React.FormEvent) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!newSupplierName.trim()) return;
-    submit(
-      {
-        intent: "ADD_SUPPLIER",
-        name: newSupplierName,
-        email: newSupplierEmail,
-        defaultLeadTime: newSupplierLeadTime,
-        currency: newSupplierCurrency,
-        notes: newSupplierNotes,
-      },
-      { method: "post" },
-    );
+
+    if (editingSupplier) {
+      submit(
+        {
+          intent: "UPDATE_SUPPLIER",
+          supplierId: editingSupplier.id,
+          name: newSupplierName,
+          contactName: newSupplierContactName,
+          email: newSupplierEmail,
+          phone: newSupplierPhone,
+          defaultLeadTime: newSupplierLeadTime,
+          currency: newSupplierCurrency,
+          notes: newSupplierNotes,
+        },
+        { method: "post" },
+      );
+    } else {
+      submit(
+        {
+          intent: "ADD_SUPPLIER",
+          name: newSupplierName,
+          contactName: newSupplierContactName,
+          email: newSupplierEmail,
+          phone: newSupplierPhone,
+          defaultLeadTime: newSupplierLeadTime,
+          currency: newSupplierCurrency,
+          notes: newSupplierNotes,
+        },
+        { method: "post" },
+      );
+    }
   };
+
+  // Backwards-compatible alias for any legacy references
+  const handleCreateSupplier = handleSaveSupplier;
 
   const handleQuickAddVendor = (vendorName: string) => {
     if (isStarter && suppliers.length >= 1) {
@@ -1898,7 +2030,7 @@ export default function ReplenishmentDashboard() {
                         );
                         return;
                       }
-                      setShowSupplierModal(true);
+                      handleOpenAddSupplier();
                     }}
                   >
                     + Add Custom Supplier
@@ -1973,9 +2105,14 @@ export default function ReplenishmentDashboard() {
 
                 {/* Configured Suppliers List */}
                 <BlockStack gap="300">
-                  <Text as="h3" variant="headingSm">
-                    Active Suppliers ({suppliers.length}):
-                  </Text>
+                  <InlineStack align="space-between" blockAlign="center">
+                    <Text as="h3" variant="headingSm">
+                      Active Suppliers ({suppliers.length}):
+                    </Text>
+                    <Text as="span" variant="bodyXs" tone="subdued">
+                      Click edit to adjust vendor lead times or contact details
+                    </Text>
+                  </InlineStack>
 
                   {suppliers.length === 0 ? (
                     <div
@@ -2000,26 +2137,56 @@ export default function ReplenishmentDashboard() {
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "space-between",
-                            padding: "14px 18px",
+                            padding: "16px 20px",
                             backgroundColor: "#ffffff",
                             border: "1px solid #e1e3e5",
                             borderRadius: "10px",
+                            boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
                           }}
                         >
-                          <div>
-                            <Text as="span" variant="bodyMd" fontWeight="bold">
-                              {sup.name}
-                            </Text>
-                            <div style={{ fontSize: "12px", color: "#6d7175", marginTop: "2px" }}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              <Text as="span" variant="bodyMd" fontWeight="bold">
+                                {sup.name}
+                              </Text>
+                              {sup.contactName && (
+                                <Text as="span" variant="bodySm" tone="subdued">
+                                  ({sup.contactName})
+                                </Text>
+                              )}
+                            </div>
+                            <div style={{ fontSize: "12px", color: "#6d7175" }}>
                               {sup.email ? `Email: ${sup.email} • ` : ""}
+                              {sup.phone ? `Phone: ${sup.phone} • ` : ""}
                               Currency: {sup.currency}
+                              {sup.notes ? ` • Note: ${sup.notes}` : ""}
                             </div>
                           </div>
-                          <Badge tone="info">{`${sup.defaultLeadTime} Days Lead Time`}</Badge>
+
+                          <InlineStack gap="300" blockAlign="center">
+                            <Badge tone="info" size="large">
+                              {`${sup.defaultLeadTime} Days Lead Time`}
+                            </Badge>
+                            <Button
+                              icon={EditIcon}
+                              variant="secondary"
+                              onClick={() => handleOpenEditSupplier(sup)}
+                            >
+                              Edit Details & Lead Time
+                            </Button>
+                          </InlineStack>
                         </div>
                       ))}
                     </div>
                   )}
+
+                  <Box paddingBlockStart="200">
+                    <Banner tone="info">
+                      <p>
+                        <strong>Updating supplier information is optional right now.</strong> ClearStock sets a 14-day default lead time automatically. You can edit them now or later in the <strong>Suppliers</strong> tab, and click <strong>Continue to Restock Review</strong> whenever you are ready.
+                      </p>
+                    </Banner>
+                  </Box>
                 </BlockStack>
 
                 <InlineStack align="space-between" blockAlign="center">
@@ -2803,25 +2970,31 @@ export default function ReplenishmentDashboard() {
       {/* MODALS & OVERLAYS                                            */}
       {/* ════════════════════════════════════════════════════════════ */}
 
-      {/* 1. Add Supplier Modal (Step 3 or Header) */}
+      {/* 1. Add / Edit Supplier Modal (Step 3 or Dashboard) */}
       <Modal
         open={showSupplierModal}
-        onClose={() => setShowSupplierModal(false)}
-        title="Add New Supplier"
+        onClose={() => {
+          setShowSupplierModal(false);
+          setEditingSupplier(null);
+        }}
+        title={editingSupplier ? `Edit Supplier: ${editingSupplier.name}` : "Add New Supplier"}
         primaryAction={{
-          content: isAddingSupplier ? "Saving..." : "Save Supplier",
-          disabled: !newSupplierName.trim() || isAddingSupplier,
-          onAction: handleCreateSupplier,
+          content: isAddingSupplier || isUpdatingSupplier ? "Saving..." : editingSupplier ? "Update Supplier" : "Save Supplier",
+          disabled: !newSupplierName.trim() || isAddingSupplier || isUpdatingSupplier,
+          onAction: handleSaveSupplier,
         }}
         secondaryActions={[
           {
             content: "Cancel",
-            onAction: () => setShowSupplierModal(false),
+            onAction: () => {
+              setShowSupplierModal(false);
+              setEditingSupplier(null);
+            },
           },
         ]}
       >
         <Modal.Section>
-          <form onSubmit={handleCreateSupplier}>
+          <form onSubmit={handleSaveSupplier}>
             <BlockStack gap="400">
               <TextField
                 label="Supplier Name"
@@ -2831,26 +3004,43 @@ export default function ReplenishmentDashboard() {
                 autoComplete="off"
                 requiredIndicator
               />
-              <TextField
-                label="Contact Email"
-                type="email"
-                value={newSupplierEmail}
-                onChange={setNewSupplierEmail}
-                placeholder="orders@apexapparel.com"
-                autoComplete="off"
-                helpText="Purchase order PDFs will be addressed to this email."
-              />
               <InlineGrid columns={{ xs: 1, md: 2 }} gap="300">
+                <TextField
+                  label="Contact Person Name"
+                  value={newSupplierContactName}
+                  onChange={setNewSupplierContactName}
+                  placeholder="e.g. Sarah Jenkins"
+                  autoComplete="off"
+                />
+                <TextField
+                  label="Contact Email"
+                  type="email"
+                  value={newSupplierEmail}
+                  onChange={setNewSupplierEmail}
+                  placeholder="orders@apexapparel.com"
+                  autoComplete="email"
+                  helpText="Purchase order PDFs will be addressed to this email."
+                />
+              </InlineGrid>
+              <InlineGrid columns={{ xs: 1, md: 3 }} gap="300">
                 <TextField
                   label="Default Lead Time (Days)"
                   type="number"
                   value={newSupplierLeadTime}
                   onChange={setNewSupplierLeadTime}
                   autoComplete="off"
-                  helpText="Total calendar days from PO placement to delivery."
+                  helpText="Days from PO to warehouse receipt."
+                  requiredIndicator
+                />
+                <TextField
+                  label="Phone Number"
+                  value={newSupplierPhone}
+                  onChange={setNewSupplierPhone}
+                  placeholder="e.g. +1 (555) 019-2834"
+                  autoComplete="tel"
                 />
                 <Select
-                  label="Currency"
+                  label="Billing Currency"
                   options={[
                     { label: "USD ($)", value: "USD" },
                     { label: "CAD ($)", value: "CAD" },
