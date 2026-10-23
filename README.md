@@ -1,237 +1,357 @@
-# Shopify App Template - React Router
+# ClearStock: Inventory Forecasting & Purchase Orders
 
-This is a template for building a [Shopify app](https://shopify.dev/docs/apps/getting-started) using [React Router](https://reactrouter.com/). It was forked from the [Shopify Remix app template](https://github.com/Shopify/shopify-app-template-remix) and converted to React Router.
+> **Enterprise-grade replenishment intelligence, automated purchase order generation, and real-time multi-location warehouse receiving for Shopify merchants.**
 
-Rather than cloning this repo, follow the [Quick Start steps](https://github.com/Shopify/shopify-app-template-react-router#quick-start).
+---
 
-Visit the [`shopify.dev` documentation](https://shopify.dev/docs/api/shopify-app-react-router) for more details on the React Router app package.
+## 1. Executive Summary & Purpose
 
-## Upgrading from Remix
+**ClearStock** is a full-featured, embedded Shopify application designed to eliminate stockouts and prevent dead capital. Built on modern Shopify standards (React Router v7, Shopify Polaris v13, Shopify App Bridge, Prisma ORM, and PostgreSQL), ClearStock acts as an autonomous inventory control center for high-growth e-commerce merchants.
 
-If you have an existing Remix app that you want to upgrade to React Router, please follow the [upgrade guide](https://github.com/Shopify/shopify-app-template-react-router/wiki/Upgrading-from-Remix). Otherwise, please follow the quick start guide below.
+Unlike generic inventory tools that rely on static minimums, ClearStock uses **real-time sales velocity analysis across dynamic timeframes (7D, 14D, 30D, 90D)** combined with supplier lead times, custom safety stock formulas, and master carton multiples to tell merchants:
+1. **Exactly what to reorder today** (Strict Reorder Point gating).
+2. **Exactly how many cartons to order** (automated MOQ and Case Pack rounding).
+3. **When items will run out** (runway calculations in days).
+4. **How much capital is trapped in overstock** (dead cash valuation).
+5. **Which warehouse to route shipments to** (two-way multi-location receiving via Shopify GraphQL).
 
-## Quick start
+---
+
+## 2. System Architecture & Tech Stack
+
+```mermaid
+graph TD
+    Shopify[Shopify Admin API & Webhooks] <--> AppBridge[Shopify App Bridge & Embedded UI]
+    AppBridge <--> Router[React Router v7 / Vite Server]
+    Router <--> Engine[Replenishment & Math Engine]
+    Router <--> Webhooks[Webhook Ingestion & Idempotency Ledger]
+    Webhooks <--> DB[(PostgreSQL via Prisma ORM)]
+    Engine <--> DB
+    Engine --> GQLMutations[Shopify GraphQL: inventoryAdjustQuantities]
+    GQLMutations --> Shopify
+```
+
+### Technology Highlights
+- **Framework:** React Router v7 (Full-Stack SSR + Client Transitions via Vite)
+- **UI Design System:** Shopify Polaris v13 + Custom Modern Dashboard Aesthetics
+- **Embedded Integration:** `@shopify/app-bridge-react` + App Bridge Session Token Authentication
+- **ORM & Database:** Prisma v6 with PostgreSQL (`DATABASE_URL`)
+- **API Version:** Shopify Admin GraphQL API `2025-01`
+- **Idempotent Webhooks:** Sub-second sales ingestion with duplicate suppression (`ProcessedWebhook`)
+- **GDPR / Privacy Compliance:** Zero Customer PII architecture with 1-click JSON data archive export
+
+---
+
+## 3. The Replenishment Mathematical Engine
+
+ClearStock executes sub-second math across your entire SKU catalog using a 9-step inventory forecasting formula.
+
+```mermaid
+flowchart LR
+    A[Daily Sales Aggregator] --> B(Average Daily Sales: 7D / 14D / 30D / 90D)
+    B --> C[Lead Time Demand = ADS x Lead Time Days]
+    B --> D[Safety Stock = ADS x Safety Days x Formula Multiplier]
+    C & D --> E[Reorder Point ROP = Lead Time Demand + Safety Stock]
+    B --> F[Cycle Stock = ADS x PO Frequency Days]
+    E & F --> G[Target Stock Level = ROP + Cycle Stock]
+    G --> H{Stock on Hand + On Order <= ROP?}
+    H -- Yes --> I[Raw Deficit = Target Stock - Effective Stock]
+    I --> J[Round up to MOQ & Case Pack Multiples]
+    J --> K[Recommended PO Units & Cases]
+    H -- No --> L[Status: Stock OK / Overstocked]
+```
+
+### Detailed Mathematical Definitions
+
+1. **Average Daily Sales (ADS):**
+   $$\text{ADS}_{\text{window}} = \frac{\sum \text{Paid Units Sold in Window}}{\text{Window Days (7, 14, 30, or 90)}}$$
+2. **Lead Time Demand (LTD):**
+   $$\text{LTD} = \text{ADS} \times \text{Supplier Lead Time Days}$$
+3. **Custom Safety Stock ($SS$):**
+   $$SS_{\text{calculated}} = \text{ADS} \times \text{Safety Stock Target Days} \times \text{Formula Multiplier}$$
+   $$SS = \max(SS_{\text{calculated}}, \text{Safety Stock Floor Minimum})$$
+4. **Reorder Point (ROP):**
+   $$\text{ROP} = \text{round}(\text{LTD} + SS)$$
+5. **Cycle Stock ($CS$):**
+   $$CS = \text{round}(\text{ADS} \times \text{Reorder Frequency Days (default: 30)})$$
+6. **Target Stock Level (Order-Up-To Level):**
+   $$\text{Target Level} = \text{ROP} + CS$$
+7. **Effective Stock Position:**
+   $$\text{Effective Stock} = \text{Stock on Hand} + \text{Inbound Stock on Open POs}$$
+8. **Strict ROP Gate & Recommended PO Units:**
+   - If $\text{Effective Stock} \le \text{ROP}$, replenishment is triggered.
+   - $\text{Raw Deficit} = \max(0, \text{Target Level} - \text{Effective Stock})$
+   - $\text{Cartons Needed} = \left\lceil \frac{\max(\text{Raw Deficit}, \text{MOQ})}{\text{Case Pack Multiplier}} \right\rceil$
+   - $\text{Recommended PO Units} = \text{Cartons Needed} \times \text{Case Pack Multiplier}$
+9. **Overstock Threshold & Dead Capital Valuation:**
+   - $\text{Overstock Ceiling} = \text{round}(\text{Target Level} \times 1.15)$
+   - If $\text{Stock on Hand} > \text{Overstock Ceiling}$, the item is tagged **Overstocked**.
+   - $\text{Dead Cash Value} = (\text{Stock on Hand} - \text{Target Level}) \times \text{Unit Cost}$
+
+---
+
+## 4. Comprehensive Feature Guide
+
+### 4.1 Replenishment Dashboard (`/app`)
+- **Real-Time KPI Cards:** Instant visibility into:
+  - *Reorder Now* items (urgent stockout risk).
+  - *Incoming* orders (units currently in transit).
+  - *Overstocked* variants (excess inventory).
+  - *Healthy Stock* (optimally balanced runway).
+  - *Total Dead Capital Trapped* (capital eligible for liquidation/clearance).
+- **Interactive Velocity Toggles:** Switch between 7D (spike detection), 14D (bi-weekly trend), 30D (standard baseline), and 90D (macro seasonality).
+- **Mathematical Inspector Modal:** Click **Inspect** on any product to see step-by-step audit calculations, formula multipliers, and exact carton rounding breakdowns.
+- **Bulk Purchase Order Generation:** Select multiple low-stock SKUs and click **Create Purchase Order**. The system automatically groups items by vendor and generates dedicated POs.
+
+### 4.2 Supplier & Sourcing Management (`/app/suppliers`)
+- **Centralized Supplier Directory:** Manage vendor names, contact emails, phone numbers, default lead times, and currency.
+- **Variant-Level Constraint Overrides:** Configure specific rules per variant:
+  - Unit Cost (COGS).
+  - Custom Lead Time overrides (days).
+  - Minimum Order Quantity (MOQ).
+  - Case Pack / Master Carton multiples (e.g. 6, 12, 24).
+  - Safety stock target days and hard unit safety floors.
+- **Catalog CSV Import/Export:** Export complete supplier rules or bulk-update constraints using spreadsheet uploads.
+
+### 4.3 Purchase Order Lifecycle (`/app/purchase-orders`)
+- **End-to-End Status Pipeline:**
+  - `DRAFT`: Editable purchase order; add/remove items, adjust quantities, review order valuation.
+  - `ORDERED`: Locked PO awaiting delivery; inbound stock is credited to `Stock on Order` across the dashboard to prevent double-ordering.
+  - `PARTIALLY_RECEIVED`: Allows recording partial shipments with tracking of outstanding balances.
+  - `RECEIVED`: Completed order; final stock credited to Shopify inventory.
+  - `CANCELLED`: Voids the order and releases on-order stock reservations.
+- **Supplier PO Email & Print:** Export formal supplier-ready purchase order summaries with itemized costs, order numbers, and contact details.
+
+### 4.4 Two-Way Multi-Location Warehouse Receiving (`/app/purchase-orders/:id`)
+- **Shopify GraphQL Live Sync:** Clicking **Receive Items** triggers Shopify's Admin GraphQL mutation `inventoryAdjustQuantities`.
+- **Destination Warehouse Selection (Scale Plan):** Merchants managing multiple Shopify locations can select the exact destination warehouse (e.g. *Main 3PL*, *West Coast Warehouse*, *Retail Storefront*).
+- **Local & Remote Synchronization:** Simultaneously updates Shopify storefront stock levels and local ClearStock database records.
+
+### 4.5 Settings & Data Sync Engine (`/app/settings`)
+- **Global Replenishment Defaults:** Default lookback windows, baseline safety days, fallback transit lead times, and automated case pack rounding.
+- **Custom Safety Stock Formula Models (Scale Plan):**
+  - **Standard (1.0x):** Baseline safety stock ($ADS \times \text{Days}$).
+  - **Surge Protection (+25%):** Increases safety stock by 25% for high-volatility merchants.
+  - **Aggressive Peak (+50%):** Zero-stockout policy buffer for holiday rushes and flash sales.
+  - **Lean / JIT (-20%):** Rapid-inventory-turnover model for cash-flow-optimized businesses.
+- **Shopify 90-Day Historical Resync:** 1-click self-healing engine that re-aggregates Shopify historical orders and repairs local sales data.
+- **GDPR Article 15 Data Portability:** Download complete JSON archives of store configurations, supplier directories, and sales ledgers.
+
+---
+
+## 5. Subscription Plans & Feature Matrix
+
+Subscription tiers are enforced via `app/utils/planGatekeeper.ts` with automated UI badge gating and trial tracking:
+
+| Feature / Capability | Starter Plan ($9/mo) | Growth Plan ($39/mo) | Scale Plan ($89/mo) |
+| :--- | :---: | :---: | :---: |
+| **Free Trial** | 14 Days | 14 Days *(Recommended)* | 14 Days *(Enterprise)* |
+| **SKU & Variant Limit** | Up to 50 SKUs | Unlimited | Unlimited |
+| **Supplier Directory** | 1 Primary Supplier | Unlimited Suppliers | Unlimited Suppliers |
+| **Sales Velocity Windows** | 30D Baseline only | 7D, 14D, 30D, and 90D | 7D, 14D, 30D, and 90D |
+| **Case Pack & MOQ Rounding** | 🔒 Locked | Included | Included |
+| **1-Click Purchase Orders** | Included | Included | Included |
+| **Multi-Location Warehouse Receiving** | Primary Location only | Primary Location only | **Any Shopify Location** |
+| **Custom Safety Stock Formulas** | Standard (1.0x) only | Standard (1.0x) only | **Surge (+25%), Aggressive (+50%), Lean (-20%)** |
+| **Support SLA** | Standard | Standard | **Priority 24/7 SLA** |
+
+---
+
+## 6. Merchant User Journey
+
+```mermaid
+journey
+    title Complete Merchant Journey with ClearStock
+    section Installation & Setup
+      Install from Shopify App Store: 5: Merchant
+      Automated Session Auth: 5: ClearStock
+      Run Initial 90-Day Sync: 5: ClearStock
+      Configure Sourcing Defaults: 4: Merchant
+    section Daily Operations
+      Review Replenishment Dashboard: 5: Merchant
+      Audit Reorder Points via Math Inspector: 5: Merchant
+      Toggle 7D/14D/30D/90D Velocity Windows: 5: Merchant
+    section Ordering & Receiving
+      1-Click Draft PO Generation: 5: Merchant
+      Email / Export PO to Supplier: 5: Merchant
+      Boxes Arrive at Warehouse: 4: Merchant
+      Receive Items into Shopify Location: 5: ClearStock, Merchant
+      Live Store Inventory Auto-Updated: 5: Shopify, ClearStock
+```
+
+1. **Install App:** Merchant installs ClearStock from Shopify Admin. OAuth scopes are granted automatically.
+2. **Initial Sync:** Background ingestion processes up to 90 days of Shopify paid order history, populating the `DailySalesAggregator` cache without blocking UI responsiveness.
+3. **Supplier Setup:** Sourcing constraints (MOQ, case packs, lead times, and unit costs) are configured in the Supplier directory or auto-populated from Shopify product vendors.
+4. **Daily Replenishment Review:** The merchant monitors the dashboard for **Reorder Now** alerts. They can switch lookback windows (e.g. 7D during Black Friday) or test custom formula buffers.
+5. **PO Generation:** Clicking **Draft PO** compiles recommended carton counts. The merchant confirms the draft and sends it to the vendor.
+6. **Receiving & Live Adjustment:** Upon shipment arrival, the merchant selects the destination location in the receiving modal. ClearStock adjusts Shopify inventory levels in real time.
+
+---
+
+## 7. Data Models & Database Schema
+
+The database is managed via Prisma ORM connected to PostgreSQL. Below are the primary models:
+
+```mermaid
+erDiagram
+    Supplier ||--o{ VariantSupplierRule : provides
+    Supplier ||--o{ PurchaseOrder : receives
+    PurchaseOrder ||--o{ PurchaseOrderItem : contains
+    AppSettings ||--|| Session : configures
+    DailySalesAggregator }|--|| VariantSupplierRule : tracks
+
+    Supplier {
+        string id PK
+        string shop
+        string name
+        int defaultLeadTime
+        string currency
+    }
+
+    VariantSupplierRule {
+        string id PK
+        string shop
+        string variantId
+        string inventoryItemId
+        string productId
+        int availableStock
+        decimal unitCost
+        int leadTimeDays
+        int minOrderQty
+        int packSize
+        int safetyStockDays
+        int safetyStockMinimum
+    }
+
+    PurchaseOrder {
+        string id PK
+        string shop
+        string poNumber
+        enum status
+        datetime expectedArrival
+    }
+
+    PurchaseOrderItem {
+        string id PK
+        string purchaseOrderId FK
+        string variantId
+        string inventoryItemId
+        int quantityOrdered
+        int quantityReceived
+        decimal unitCost
+    }
+
+    DailySalesAggregator {
+        string id PK
+        string shop
+        string variantId
+        date date
+        int unitsSold
+    }
+
+    AppSettings {
+        string id PK
+        string shop UK
+        int defaultLookbackWindow
+        int defaultSafetyStockDays
+        int defaultLeadTimeDays
+        boolean autoRoundCasePacks
+        string selectedPlan
+        string safetyFormulaModel
+    }
+
+    ProcessedWebhook {
+        string id PK
+        string shop
+        string topic
+        string orderId
+    }
+```
+
+---
+
+## 8. Webhook Architecture & Idempotency
+
+ClearStock registers and monitors the following Shopify webhooks:
+
+| Webhook Topic | Route URI | Description |
+| :--- | :--- | :--- |
+| `orders/create` | `/webhooks/orders/create` | Increments daily sales velocity for paid line items. |
+| `orders/updated` | `/webhooks/orders/updated` | Reconciles payments, adjustments, and refunds. |
+| `inventory_levels/update` | `/webhooks/inventory_levels/update` | Aggregates stock on hand across all active Shopify locations. |
+| `products/create` & `update` | `/webhooks/products/create` | Ingests new SKUs, vendors, and links `inventoryItemId`. |
+| `products/delete` | `/webhooks/products/delete` | Cleans up removed catalog variants from local database. |
+| `app/uninstalled` | `/webhooks/app/uninstalled` | Revokes sessions and triggers clean-up routine. |
+| `customers/data_request` | `/webhooks/customers/data_request` | GDPR compliance response (No Customer PII stored). |
+| `customers/redact` | `/webhooks/customers/redact` | GDPR customer redaction (Zero Customer PII acknowledgment). |
+| `shop/redact` | `/webhooks/shop/redact` | GDPR merchant deletion (Purges store database records). |
+
+### Webhook Idempotency Guarantee
+To prevent double-counting sales when Shopify sends multiple retries of `orders/create` and `orders/updated`, ClearStock logs incoming webhook IDs into the `ProcessedWebhook` ledger. Any duplicate payloads within the same shop and order ID are detected and skipped before touching the sales cache.
+
+---
+
+## 9. Local Development & Setup
 
 ### Prerequisites
-
-Before you begin, you'll need to [download and install the Shopify CLI](https://shopify.dev/docs/apps/tools/cli/getting-started) if you haven't already.
-
-### Setup
-
-```shell
-shopify app init --template=https://github.com/Shopify/shopify-app-template-react-router
-```
-
-### Local Development
-
-```shell
-shopify app dev
-```
-
-Press P to open the URL to your app. Once you click install, you can start development.
-
-Local development is powered by [the Shopify CLI](https://shopify.dev/docs/apps/tools/cli). It logs into your account, connects to an app, provides environment variables, updates remote config, creates a tunnel and provides commands to generate extensions.
-
-### Authenticating and querying data
-
-To authenticate and query data you can use the `shopify` const that is exported from `/app/shopify.server.js`:
-
-```js
-export async function loader({ request }) {
-  const { admin } = await shopify.authenticate.admin(request);
-
-  const response = await admin.graphql(`
-    {
-      products(first: 25) {
-        nodes {
-          title
-          description
-        }
-      }
-    }`);
-
-  const {
-    data: {
-      products: { nodes },
-    },
-  } = await response.json();
-
-  return nodes;
-}
-```
-
-This template comes pre-configured with examples of:
-
-1. Setting up your Shopify app in [/app/shopify.server.ts](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/shopify.server.ts)
-2. Querying data using Graphql. Please see: [/app/routes/app.\_index.tsx](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/routes/app._index.tsx).
-3. Responding to webhooks. Please see [/app/routes/webhooks.tsx](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/routes/webhooks.app.uninstalled.tsx).
-4. Using metafields, metaobjects, and declarative custom data definitions. Please see [/app/routes/app.\_index.tsx](https://github.com/Shopify/shopify-app-template-react-router/blob/main/app/routes/app._index.tsx) and [shopify.app.toml](https://github.com/Shopify/shopify-app-template-react-router/blob/main/shopify.app.toml).
-
-Please read the [documentation for @shopify/shopify-app-react-router](https://shopify.dev/docs/api/shopify-app-react-router) to see what other API's are available.
-
-## Shopify Dev MCP
-
-This template is configured with the Shopify Dev MCP. This instructs [Cursor](https://cursor.com/), [GitHub Copilot](https://github.com/features/copilot) and [Claude Code](https://claude.com/product/claude-code) and [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) to use the Shopify Dev MCP.
-
-For more information on the Shopify Dev MCP please read [the documentation](https://shopify.dev/docs/apps/build/devmcp).
-
-## Deployment
-
-### Application Storage
-
-This template uses [Prisma](https://www.prisma.io/) to store session data, by default using an [SQLite](https://www.sqlite.org/index.html) database.
-The database is defined as a Prisma schema in `prisma/schema.prisma`.
-
-This use of SQLite works in production if your app runs as a single instance.
-The database that works best for you depends on the data your app needs and how it is queried.
-Here’s a short list of databases providers that provide a free tier to get started:
-
-| Database   | Type             | Hosters                                                                                                                                                                                                                                    |
-| ---------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| MySQL      | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mysql), [Planet Scale](https://planetscale.com/), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/mysql) |
-| PostgreSQL | SQL              | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-postgresql), [Amazon Aurora](https://aws.amazon.com/rds/aurora/), [Google Cloud SQL](https://cloud.google.com/sql/docs/postgres)                                   |
-| Redis      | Key-value        | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-redis), [Amazon MemoryDB](https://aws.amazon.com/memorydb/)                                                                                                        |
-| MongoDB    | NoSQL / Document | [Digital Ocean](https://www.digitalocean.com/products/managed-databases-mongodb), [MongoDB Atlas](https://www.mongodb.com/atlas/database)                                                                                                  |
-
-To use one of these, you can use a different [datasource provider](https://www.prisma.io/docs/reference/api-reference/prisma-schema-reference#datasource) in your `schema.prisma` file, or a different [SessionStorage adapter package](https://github.com/Shopify/shopify-api-js/blob/main/packages/shopify-api/docs/guides/session-storage.md).
-
-### Build
-
-Build the app by running the command below with the package manager of your choice:
-
-Using yarn:
-
-```shell
-yarn build
-```
-
-Using npm:
-
-```shell
-npm run build
-```
-
-Using pnpm:
-
-```shell
-pnpm run build
-```
-
-## Hosting
-
-When you're ready to set up your app in production, you can follow [our deployment documentation](https://shopify.dev/docs/apps/launch/deployment) to host it externally. From there, you have a few options:
-
-- [Google Cloud Run](https://shopify.dev/docs/apps/launch/deployment/deploy-to-google-cloud-run): This tutorial is written specifically for this example repo, and is compatible with the extended steps included in the subsequent [**Build your app**](tutorial) in the **Getting started** docs. It is the most detailed tutorial for taking a React Router-based Shopify app and deploying it to production. It includes configuring permissions and secrets, setting up a production database, and even hosting your apps behind a load balancer across multiple regions.
-- [Fly.io](https://fly.io/docs/js/shopify/): Leverages the Fly.io CLI to quickly launch Shopify apps to a single machine.
-- [Render](https://render.com/docs/deploy-shopify-app): This tutorial guides you through using Docker to deploy and install apps on a Dev store.
-- [Manual deployment guide](https://shopify.dev/docs/apps/launch/deployment/deploy-to-hosting-service): This resource provides general guidance on the requirements of deployment including environment variables, secrets, and persistent data.
-
-When you reach the step for [setting up environment variables](https://shopify.dev/docs/apps/deployment/web#set-env-vars), you also need to set the variable `NODE_ENV=production`.
-
-## Gotchas / Troubleshooting
-
-### Database tables don't exist
-
-If you get an error like:
-
-```
-The table `main.Session` does not exist in the current database.
-```
-
-Create the database for Prisma. Run the `setup` script in `package.json` using `npm`, `yarn` or `pnpm`.
-
-### Navigating/redirecting breaks an embedded app
-
-Embedded apps must maintain the user session, which can be tricky inside an iFrame. To avoid issues:
-
-1. Use `Link` from `react-router` or `@shopify/polaris`. Do not use `<a>`.
-2. Use `redirect` returned from `authenticate.admin`. Do not use `redirect` from `react-router`
-3. Use `useSubmit` from `react-router`.
-
-This only applies if your app is embedded, which it will be by default.
-
-### Webhooks: shop-specific webhook subscriptions aren't updated
-
-If you are registering webhooks in the `afterAuth` hook, using `shopify.registerWebhooks`, you may find that your subscriptions aren't being updated.
-
-Instead of using the `afterAuth` hook declare app-specific webhooks in the `shopify.app.toml` file. This approach is easier since Shopify will automatically sync changes every time you run `deploy` (e.g: `npm run deploy`). Please read these guides to understand more:
-
-1. [app-specific vs shop-specific webhooks](https://shopify.dev/docs/apps/build/webhooks/subscribe#app-specific-subscriptions)
-2. [Create a subscription tutorial](https://shopify.dev/docs/apps/build/webhooks/subscribe/get-started?deliveryMethod=https)
-
-If you do need shop-specific webhooks, keep in mind that the package calls `afterAuth` in 2 scenarios:
-
-- After installing the app
-- When an access token expires
-
-During normal development, the app won't need to re-authenticate most of the time, so shop-specific subscriptions aren't updated. To force your app to update the subscriptions, uninstall and reinstall the app. Revisiting the app will call the `afterAuth` hook.
-
-### Webhooks: Admin created webhook failing HMAC validation
-
-Webhooks subscriptions created in the [Shopify admin](https://help.shopify.com/en/manual/orders/notifications/webhooks) will fail HMAC validation. This is because the webhook payload is not signed with your app's secret key.
-
-The recommended solution is to use [app-specific webhooks](https://shopify.dev/docs/apps/build/webhooks/subscribe#app-specific-subscriptions) defined in your toml file instead. Test your webhooks by triggering events manually in the Shopify admin(e.g. Updating the product title to trigger a `PRODUCTS_UPDATE`).
-
-### Webhooks: Admin object undefined on webhook events triggered by the CLI
-
-When you trigger a webhook event using the Shopify CLI, the `admin` object will be `undefined`. This is because the CLI triggers an event with a valid, but non-existent, shop. The `admin` object is only available when the webhook is triggered by a shop that has installed the app. This is expected.
-
-Webhooks triggered by the CLI are intended for initial experimentation testing of your webhook configuration. For more information on how to test your webhooks, see the [Shopify CLI documentation](https://shopify.dev/docs/apps/tools/cli/commands#webhook-trigger).
-
-### Incorrect GraphQL Hints
-
-By default the [graphql.vscode-graphql](https://marketplace.visualstudio.com/items?itemName=GraphQL.vscode-graphql) extension for will assume that GraphQL queries or mutations are for the [Shopify Admin API](https://shopify.dev/docs/api/admin). This is a sensible default, but it may not be true if:
-
-1. You use another Shopify API such as the storefront API.
-2. You use a third party GraphQL API.
-
-If so, please update [.graphqlrc.ts](https://github.com/Shopify/shopify-app-template-react-router/blob/main/.graphqlrc.ts).
-
-### Using Defer & await for streaming responses
-
-By default the CLI uses a cloudflare tunnel. Unfortunately cloudflare tunnels wait for the Response stream to finish, then sends one chunk. This will not affect production.
-
-To test [streaming using await](https://reactrouter.com/api/components/Await#await) during local development we recommend [localhost based development](https://shopify.dev/docs/apps/build/cli-for-apps/networking-options#localhost-based-development).
-
-### "nbf" claim timestamp check failed
-
-This is because a JWT token is expired. If you are consistently getting this error, it could be that the clock on your machine is not in sync with the server. To fix this ensure you have enabled "Set time and date automatically" in the "Date and Time" settings on your computer.
-
-### Using MongoDB and Prisma
-
-If you choose to use MongoDB with Prisma, there are some gotchas in Prisma's MongoDB support to be aware of. Please see the [Prisma SessionStorage README](https://www.npmjs.com/package/@shopify/shopify-app-session-storage-prisma#mongodb).
-
-### Unable to require(`C:\...\query_engine-windows.dll.node`).
-
-Unable to require(`C:\...\query_engine-windows.dll.node`).
-The Prisma engines do not seem to be compatible with your system.
-
-query_engine-windows.dll.node is not a valid Win32 application.
-
-**Fix:** Set the environment variable:
-
-```shell
-PRISMA_CLIENT_ENGINE_TYPE=binary
-```
-
-This forces Prisma to use the binary engine mode, which runs the query engine as a separate process and can work via emulation on Windows ARM64.
-
-## Resources
-
-React Router:
-
-- [React Router docs](https://reactrouter.com/home)
-
-Shopify:
-
-- [Intro to Shopify apps](https://shopify.dev/docs/apps/getting-started)
-- [Shopify App React Router docs](https://shopify.dev/docs/api/shopify-app-react-router)
-- [Shopify CLI](https://shopify.dev/docs/apps/tools/cli)
-- [Shopify App Bridge](https://shopify.dev/docs/api/app-bridge-library).
-- [Polaris Web Components](https://shopify.dev/docs/api/app-home/polaris-web-components).
-- [App extensions](https://shopify.dev/docs/apps/app-extensions/list)
-- [Shopify Functions](https://shopify.dev/docs/api/functions)
-
-Internationalization:
-
-- [Internationalizing your app](https://shopify.dev/docs/apps/best-practices/internationalization/getting-started)
+- **Node.js:** v18.20+ or v20+
+- **Shopify CLI:** v3.50+
+- **PostgreSQL:** Local instance or cloud database (Neon, Supabase, AWS RDS)
+
+### Installation Steps
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/your-org/clear-stock-inventory-p-os.git
+   cd clear-stock-inventory-p-os
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Configure Environment Variables:**
+   Create a `.env` file in the root directory:
+   ```env
+   SHOPIFY_API_KEY=your_shopify_api_key
+   SHOPIFY_API_SECRET=your_shopify_api_secret
+   SCOPES=read_orders,write_orders,read_products,write_products,read_inventory,write_inventory,read_locations
+   DATABASE_URL="postgresql://user:password@localhost:5432/clearstock_dev?schema=public"
+   PORT=3000
+   ```
+
+4. **Initialize Database Schema:**
+   ```bash
+   npx prisma generate
+   npx prisma db push
+   ```
+
+5. **Start Development Server:**
+   ```bash
+   npm run dev
+   ```
+   Press `P` to launch the Cloudflare / Shopify CLI tunnel and install the app on your development store.
+
+6. **Validate Types & Build:**
+   ```bash
+   npm run typecheck
+   npm run build
+   ```
+
+---
+
+## 10. Privacy, Security & GDPR Compliance
+
+- **Zero Customer PII:** ClearStock does not store customer names, emails, physical addresses, IP addresses, or payment card data. Sales data is strictly aggregated as `(shop, variantId, date, unitsSold)`.
+- **Multi-Tenant Scoping:** Every SQL query and Prisma operation strictly enforces `where: { shop: session.shop }` to guarantee complete data isolation between merchants.
+- **GDPR Article 15 Compliance:** Merchants can export their full data footprint anytime via the **Download Data Archive (.JSON)** button in `/app/settings`.
+- **Automated Shop Redaction:** When a merchant uninstalls the app and requests shop deletion via Shopify, the `/webhooks/shop/redact` endpoint permanently cleanses all associated store records.
+
+---
+
+## 11. Support & Community
+
+- **In-App Support:** Click **Contact Support** in Settings to reach our merchant success team.
+- **Enterprise SLA:** Priority 24/7 engineering support is included for all merchants on the **Scale Plan**.
+- **Documentation:** Review the interactive **Sync & Math Guide** directly within the app dashboard.
