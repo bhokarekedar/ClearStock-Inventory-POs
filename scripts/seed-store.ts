@@ -303,6 +303,30 @@ async function main() {
       const inventoryItemId = vNode.inventoryItem.id;
       console.log(`    🔹 Variant "${vSpec.optionValue}" (SKU: ${vSpec.sku}) -> ${variantId}`);
 
+      // Enable inventory tracking on Shopify for this variant
+      try {
+        const invTrackMutation = `
+          mutation InventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+            inventoryItemUpdate(id: $id, input: $input) {
+              inventoryItem {
+                id
+                tracked
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `;
+        await shopifyGql(shop, accessToken, invTrackMutation, {
+          id: inventoryItemId,
+          input: { tracked: true },
+        });
+      } catch (trackErr: any) {
+        console.warn(`      ⚠️ Could not enable tracking on ${inventoryItemId}:`, trackErr.message);
+      }
+
       // Activate inventory item at location
       try {
         const invActivateMutation = `

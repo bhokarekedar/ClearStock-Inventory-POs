@@ -472,12 +472,12 @@
   stroke-dashoffset: 0 !important;
 }
 
-/* Vibrant Shopify Emerald Green for checked checkboxes instead of harsh black box */
+/* Native Shopify Admin Black (#303030) for checked checkboxes */
 .Polaris-Checkbox__Input:checked + .Polaris-Checkbox__Backdrop,
 .Polaris-Checkbox__Input.Polaris-Checkbox__Input--indeterminate + .Polaris-Checkbox__Backdrop {
-  background-color: #008060 !important;
-  border-color: #008060 !important;
-  box-shadow: inset 0 0 0 20px #008060 !important;
+  background-color: #303030 !important;
+  border-color: #303030 !important;
+  box-shadow: inset 0 0 0 20px #303030 !important;
 }
 
 /* ==========================================================================
