@@ -914,3 +914,73 @@ button[id="tab-ok"][aria-selected="true"] .Polaris-Badge {
   color: #ffffff !important;
 }
 
+/* ==========================================================================
+   ClearStock "Plain English Story" Modal Cards
+   ========================================================================== */
+.clearstock-story-card {
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.15s ease;
+}
+
+.clearstock-story-card--slate {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+.clearstock-story-card--rose {
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+
+.clearstock-story-card--sky {
+  background: #f0f9ff;
+  border-color: #bae6fd;
+}
+
+.clearstock-story-card--emerald {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.clearstock-story-card--amber {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.clearstock-story-card--action-needed {
+  background: #fff1f2;
+  border-color: #fda4af;
+  border-left: 4px solid #e11d48;
+}
+
+.clearstock-story-badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.06);
+  letter-spacing: -0.01em;
+}
+
+.clearstock-recommendation-box {
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 12px 14px;
+  border: 1px solid #fecdd3;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.clearstock-recommendation-box--ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+

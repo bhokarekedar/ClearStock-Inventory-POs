@@ -982,6 +982,7 @@ export default function ReplenishmentDashboard() {
 
   // Modal State for Math explanation
   const [activeMathItem, setActiveMathItem] = useState<ReplenishmentItem | null>(null);
+  const [mathModalTab, setMathModalTab] = useState<"story" | "formula">("story");
   const windowDaysNum = parseInt(rollingWindow, 10) as 7 | 14 | 30 | 90;
 
   // Process rows with calculations
@@ -2445,7 +2446,13 @@ export default function ReplenishmentDashboard() {
                                 Draft PO
                               </Button>
                             )}
-                            <Button size="slim" onClick={() => setActiveMathItem(row)}>
+                            <Button
+                              size="slim"
+                              onClick={() => {
+                                setMathModalTab("story");
+                                setActiveMathItem(row);
+                              }}
+                            >
                               Inspect
                             </Button>
                           </InlineStack>
@@ -2575,11 +2582,27 @@ export default function ReplenishmentDashboard() {
         </Modal.Section>
       </Modal>
 
-      {/* 2. Math Inspection Modal */}
+      {/* 2. Math Inspection Modal (Dual-View: Plain English Story + 10-Step Formula) */}
       <Modal
         open={Boolean(activeMathItem)}
         onClose={() => setActiveMathItem(null)}
-        title={`Replenishment Formula: ${activeMathItem?.title}`}
+        title={`Replenishment Analysis: ${activeMathItem?.title}`}
+        primaryAction={
+          activeMath && activeMath.recommendedUnits > 0
+            ? {
+                content: `Draft PO (${activeMath.recommendedUnits} units)`,
+                onAction: () => {
+                  const itemId = activeMathItem?.id;
+                  setActiveMathItem(null);
+                  if (itemId) {
+                    navigate(
+                      `/app/purchase-orders/new?items=${itemId}&window=${rollingWindow}&returnTo=/app`,
+                    );
+                  }
+                },
+              }
+            : undefined
+        }
         secondaryActions={[
           {
             content: "Close",
@@ -2590,68 +2613,256 @@ export default function ReplenishmentDashboard() {
         <Modal.Section>
           {activeMath && activeMathItem && (
             <BlockStack gap="400">
-              <InlineStack align="space-between" blockAlign="center">
-                <Text as="span" variant="bodyMd" fontWeight="bold">
-                  SKU: {activeMathItem.sku}
-                </Text>
-                <Badge tone={activeMath.statusTone}>{activeMath.statusLabel}</Badge>
+              {/* Header Context & Dual-View Toggle */}
+              <InlineStack align="space-between" blockAlign="center" wrap gap="300">
+                <BlockStack gap="050">
+                  <InlineStack gap="200" blockAlign="center">
+                    <Text as="span" variant="bodyMd" fontWeight="bold">
+                      SKU: {activeMathItem.sku}
+                    </Text>
+                    <Badge tone={activeMath.statusTone}>{activeMath.statusLabel}</Badge>
+                  </InlineStack>
+                  <Text as="span" variant="bodyXs" tone="subdued">
+                    Supplier: <strong>{activeMathItem.supplierName}</strong> • Unit Cost: <strong>${activeMathItem.unitCost.toFixed(2)}</strong>
+                  </Text>
+                </BlockStack>
+
+                <ButtonGroup variant="segmented">
+                  <Button
+                    size="slim"
+                    pressed={mathModalTab === "story"}
+                    onClick={() => setMathModalTab("story")}
+                  >
+                    📖 Plain English Story
+                  </Button>
+                  <Button
+                    size="slim"
+                    pressed={mathModalTab === "formula"}
+                    onClick={() => setMathModalTab("formula")}
+                  >
+                    🧮 10-Step Formula Audit
+                  </Button>
+                </ButtonGroup>
               </InlineStack>
 
               <Divider />
 
-              <div
-                style={{
-                  backgroundColor: "#f9fafb",
-                  borderRadius: "8px",
-                  padding: "16px",
-                  border: "1px solid #e1e3e5",
-                  fontSize: "13px",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "10px",
-                }}
-              >
-                <div>
-                  <strong>1. Average Daily Sales (ADS):</strong>{" "}
-                  <code>{activeMath.ads.toFixed(1)} units/day</code> ({rollingWindow}-day window, exact: <code>{activeMath.ads.toFixed(4)}</code>)
+              {/* VIEW 1: PLAIN ENGLISH STORY (Non-Technical Merchant View) */}
+              {mathModalTab === "story" &&
+                (() => {
+                  const windowUnitsSold =
+                    rollingWindow === "7"
+                      ? activeMathItem.unitsSold7d
+                      : rollingWindow === "14"
+                      ? activeMathItem.unitsSold14d
+                      : rollingWindow === "90"
+                      ? activeMathItem.unitsSold90d
+                      : activeMathItem.unitsSold30d;
+
+                  return (
+                    <BlockStack gap="300">
+                      {/* Step 1: Sales Speed */}
+                      <div className="clearstock-story-card clearstock-story-card--slate">
+                        <InlineStack align="space-between" blockAlign="center">
+                          <Text as="h3" variant="headingSm" fontWeight="bold">
+                            1. ⚡ Sales Speed
+                          </Text>
+                          <span className="clearstock-story-badge">
+                            {activeMath.ads.toFixed(1)} units / day
+                          </span>
+                        </InlineStack>
+                        <Text as="p" variant="bodyMd">
+                          You are currently selling <strong>{activeMath.ads.toFixed(1)} units/day</strong> based on <strong>{windowUnitsSold} units sold</strong> over the last <strong>{rollingWindow} days</strong>.
+                        </Text>
+                        <Text as="p" variant="bodyXs" tone="subdued">
+                          {activeMath.ads > 0
+                            ? `At this velocity, customers purchase 1 unit roughly every ${(1 / activeMath.ads).toFixed(1)} days.`
+                            : "No recorded sales during this lookback window."}
+                        </Text>
+                      </div>
+
+                      {/* Step 2: Safety Floor */}
+                      <div className="clearstock-story-card clearstock-story-card--rose">
+                        <InlineStack align="space-between" blockAlign="center">
+                          <Text as="h3" variant="headingSm" fontWeight="bold">
+                            2. 🛡️ Your Safety Floor (When to order)
+                          </Text>
+                          <span className="clearstock-story-badge">
+                            Reorder Point: {activeMath.reorderPoint} units
+                          </span>
+                        </InlineStack>
+                        <BlockStack gap="100">
+                          <Text as="p" variant="bodyMd">
+                            • <strong>{activeMath.leadTimeDemand} units</strong> needed to cover customer sales while waiting <strong>{activeMathItem.leadTimeDays} days</strong> for delivery from {activeMathItem.supplierName}.
+                          </Text>
+                          <Text as="p" variant="bodyMd">
+                            • <strong>+ {activeMath.safetyStock} units</strong> kept as a safety cushion ({activeMathItem.safetyStockDays} days of buffer{activeMathItem.safetyStockMinimum > 0 && activeMath.safetyStock === activeMathItem.safetyStockMinimum ? ` - enforced by your ${activeMathItem.safetyStockMinimum}-unit floor` : ""}).
+                          </Text>
+                          <Divider />
+                          <Text as="p" variant="bodyMd" fontWeight="semibold">
+                            = <strong>{activeMath.reorderPoint} units (Reorder Point)</strong>. You should place an order the moment your total available stock reaches or falls below this floor.
+                          </Text>
+                        </BlockStack>
+                      </div>
+
+                      {/* Step 3: Target Ceiling */}
+                      <div className="clearstock-story-card clearstock-story-card--sky">
+                        <InlineStack align="space-between" blockAlign="center">
+                          <Text as="h3" variant="headingSm" fontWeight="bold">
+                            3. 🎯 Your Target Ceiling (How much to hold)
+                          </Text>
+                          <span className="clearstock-story-badge">
+                            Target Level: {activeMath.targetStockLevel} units
+                          </span>
+                        </InlineStack>
+                        <BlockStack gap="100">
+                          <Text as="p" variant="bodyMd">
+                            • <strong>+ {activeMath.cycleStock} units</strong> needed to cover your standard <strong>{activeMath.reorderFrequencyDays}-day order cycle</strong> (preventing frequent small orders).
+                          </Text>
+                          <Divider />
+                          <Text as="p" variant="bodyMd" fontWeight="semibold">
+                            = <strong>{activeMath.targetStockLevel} units (Target Stock Level)</strong>. This is your ideal total inventory immediately after a new delivery arrives.
+                          </Text>
+                        </BlockStack>
+                      </div>
+
+                      {/* Step 4: The Recommended Order */}
+                      <div
+                        className={`clearstock-story-card ${activeMath.isBelowReorderPoint ? "clearstock-story-card--action-needed" : "clearstock-story-card--emerald"}`}
+                      >
+                        <InlineStack align="space-between" blockAlign="center">
+                          <Text as="h3" variant="headingSm" fontWeight="bold">
+                            4. 📦 The Recommended Order
+                          </Text>
+                          <Badge tone={activeMath.isBelowReorderPoint ? "critical" : "success"}>
+                            {activeMath.isBelowReorderPoint ? "Order Needed" : "Stock Healthy"}
+                          </Badge>
+                        </InlineStack>
+                        <BlockStack gap="200">
+                          <Text as="p" variant="bodyMd">
+                            You currently have <strong>{activeMath.stockOnHand} units on hand</strong>
+                            {activeMath.stockOnOrder > 0
+                              ? ` + ${activeMath.stockOnOrder} units in transit on open POs = ${activeMath.effectiveStock} total units available.`
+                              : "."}
+                          </Text>
+
+                          {activeMath.isBelowReorderPoint ? (
+                            <BlockStack gap="150">
+                              <Text as="p" variant="bodyMd">
+                                Because available stock ({activeMath.effectiveStock}) is at or below your <strong>{activeMath.reorderPoint}-unit floor</strong>, you are short by <strong>{activeMath.rawDeficit} units</strong> to reach your {activeMath.targetStockLevel}-unit target.
+                              </Text>
+                              <div className="clearstock-recommendation-box">
+                                <Text as="p" variant="bodyMd" fontWeight="bold">
+                                  👉 Recommendation: Order {activeMath.recommendedUnits} units ({activeMath.casesCount} cases) (~${(activeMath.recommendedUnits * activeMathItem.unitCost).toFixed(2)})
+                                </Text>
+                                <Text as="p" variant="bodyXs" tone="subdued">
+                                  Respects {activeMathItem.supplierName}'s minimum order of {activeMathItem.minOrderQty} units and case pack of {activeMathItem.packSize} units/box.
+                                </Text>
+                              </div>
+                            </BlockStack>
+                          ) : (
+                            <div className="clearstock-recommendation-box clearstock-recommendation-box--ok">
+                              <Text as="p" variant="bodyMd" fontWeight="semibold">
+                                👉 No order needed today.
+                              </Text>
+                              <Text as="p" variant="bodySm" tone="subdued">
+                                Your stock ({activeMath.effectiveStock} units) is safely above your {activeMath.reorderPoint}-unit Reorder Point. ClearStock will automatically recommend an order when stock drops to {activeMath.reorderPoint}.
+                              </Text>
+                            </div>
+                          )}
+                        </BlockStack>
+                      </div>
+
+                      {/* Step 5: Health Check */}
+                      <div
+                        className={`clearstock-story-card ${activeMath.isOverstocked ? "clearstock-story-card--amber" : "clearstock-story-card--emerald"}`}
+                      >
+                        <InlineStack align="space-between" blockAlign="center">
+                          <Text as="h3" variant="headingSm" fontWeight="bold">
+                            5. 🩺 Inventory Health & Capital Check
+                          </Text>
+                          <span className="clearstock-story-badge">
+                            Ceiling: {activeMath.overstockThreshold} units
+                          </span>
+                        </InlineStack>
+                        {activeMath.isOverstocked ? (
+                          <BlockStack gap="100">
+                            <Text as="p" variant="bodyMd">
+                              🟡 <strong>Overstocked:</strong> You have {activeMath.stockOnHand} units on hand, which exceeds your {activeMath.overstockThreshold}-unit overstock ceiling (Target + 15% tolerance).
+                            </Text>
+                            <Text as="p" variant="bodyMd" fontWeight="semibold">
+                              💰 <strong>${activeMath.deadCashValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> in dead capital is tied up in {activeMath.stockOnHand - activeMath.targetStockLevel} excess units above your optimal target.
+                            </Text>
+                            <Text as="p" variant="bodyXs" tone="subdued">
+                              Tip: Consider a seasonal promotion, bundle, or discount to free up this working capital.
+                            </Text>
+                          </BlockStack>
+                        ) : (
+                          <Text as="p" variant="bodyMd">
+                            🟢 <strong>Stock is Healthy:</strong> You are safely within your target boundaries and well below your overstock threshold of {activeMath.overstockThreshold} units. Zero dead capital detected.
+                          </Text>
+                        )}
+                      </div>
+                    </BlockStack>
+                  );
+                })()}
+
+              {/* VIEW 2: 10-STEP FORMULA AUDIT (Raw Engineering / Accounting View) */}
+              {mathModalTab === "formula" && (
+                <div
+                  style={{
+                    backgroundColor: "#f9fafb",
+                    borderRadius: "8px",
+                    padding: "16px",
+                    border: "1px solid #e1e3e5",
+                    fontSize: "13px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                  }}
+                >
+                  <div>
+                    <strong>1. Average Daily Sales (ADS):</strong>{" "}
+                    <code>{activeMath.ads.toFixed(1)} units/day</code> ({rollingWindow}-day window, exact: <code>{activeMath.ads.toFixed(4)}</code>)
+                  </div>
+                  <div>
+                    <strong>2. Lead Time Demand:</strong>{" "}
+                    <code>{activeMath.ads.toFixed(4)} × {activeMathItem.leadTimeDays}d = {activeMath.leadTimeDemand} units</code>
+                  </div>
+                  <div>
+                    <strong>3. Safety Stock Buffer:</strong>{" "}
+                    <code>{activeMath.safetyStock} units</code> (Max of {activeMathItem.safetyStockDays}d coverage: {Math.round(activeMath.ads * activeMathItem.safetyStockDays)} units, Floor Min: {activeMathItem.safetyStockMinimum} units)
+                  </div>
+                  <div>
+                    <strong>4. Reorder Point (ROP Floor):</strong>{" "}
+                    <code>{activeMath.leadTimeDemand} + {activeMath.safetyStock} = {activeMath.reorderPoint} units</code>
+                  </div>
+                  <div>
+                    <strong>5. Cycle Stock (Order Cycle):</strong>{" "}
+                    <code>{activeMath.ads.toFixed(4)} × {activeMath.reorderFrequencyDays}d = {activeMath.cycleStock} units</code>
+                  </div>
+                  <div>
+                    <strong>6. Target Stock Level (Ceiling):</strong>{" "}
+                    <code>ROP ({activeMath.reorderPoint}) + Cycle Stock ({activeMath.cycleStock}) = {activeMath.targetStockLevel} units</code>
+                  </div>
+                  <div>
+                    <strong>7. Current Stock Position:</strong>{" "}
+                    <code>OnHand ({activeMath.stockOnHand}) + Inbound ({activeMath.stockOnOrder}) = {activeMath.effectiveStock} units</code>
+                  </div>
+                  <div>
+                    <strong>8. Purchase Quantity (Deficit):</strong>{" "}
+                    <code>{activeMath.isBelowReorderPoint ? `Target (${activeMath.targetStockLevel}) - Effective (${activeMath.effectiveStock}) = ${activeMath.rawDeficit} units` : "0 units (Strict ROP Gate: Stock is above ROP floor - No order needed)"}</code>
+                  </div>
+                  <div>
+                    <strong>9. Case Pack & MOQ Rounding:</strong>{" "}
+                    <code>MOQ: {activeMathItem.minOrderQty}, Pack Size: {activeMathItem.packSize} → {activeMath.recommendedUnits} units ({activeMath.casesCount} cases)</code>
+                  </div>
+                  <div>
+                    <strong>10. Overstock & Dead Capital:</strong>{" "}
+                    <code>Target ({activeMath.targetStockLevel}) × 1.15 = {activeMath.overstockThreshold} units threshold. {activeMath.isOverstocked ? `Dead Capital: (${activeMath.stockOnHand} OnHand - ${activeMath.targetStockLevel} Target) × $${activeMathItem.unitCost.toFixed(2)} = $${activeMath.deadCashValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Not overstocked"}. (Dead capital is calculated on all units held above your optimal Target Stock Level.)</code>
+                  </div>
                 </div>
-                <div>
-                  <strong>2. Lead Time Demand:</strong>{" "}
-                  <code>{activeMath.ads.toFixed(4)} × {activeMathItem.leadTimeDays}d = {activeMath.leadTimeDemand} units</code>
-                </div>
-                <div>
-                  <strong>3. Safety Stock Buffer:</strong>{" "}
-                  <code>{activeMath.safetyStock} units</code> (Max of {activeMathItem.safetyStockDays}d coverage: {Math.round(activeMath.ads * activeMathItem.safetyStockDays)} units, Floor Min: {activeMathItem.safetyStockMinimum} units)
-                </div>
-                <div>
-                  <strong>4. Reorder Point (ROP Floor):</strong>{" "}
-                  <code>{activeMath.leadTimeDemand} + {activeMath.safetyStock} = {activeMath.reorderPoint} units</code>
-                </div>
-                <div>
-                  <strong>5. Cycle Stock (Order Cycle):</strong>{" "}
-                  <code>{activeMath.ads.toFixed(4)} × {activeMath.reorderFrequencyDays}d = {activeMath.cycleStock} units</code>
-                </div>
-                <div>
-                  <strong>6. Target Stock Level (Ceiling):</strong>{" "}
-                  <code>ROP ({activeMath.reorderPoint}) + Cycle Stock ({activeMath.cycleStock}) = {activeMath.targetStockLevel} units</code>
-                </div>
-                <div>
-                  <strong>7. Current Stock Position:</strong>{" "}
-                  <code>OnHand ({activeMath.stockOnHand}) + Inbound ({activeMath.stockOnOrder}) = {activeMath.effectiveStock} units</code>
-                </div>
-                <div>
-                  <strong>8. Purchase Quantity (Deficit):</strong>{" "}
-                  <code>{activeMath.isBelowReorderPoint ? `Target (${activeMath.targetStockLevel}) - Effective (${activeMath.effectiveStock}) = ${activeMath.rawDeficit} units` : "0 units (Strict ROP Gate: Stock is above ROP floor - No order needed)"}</code>
-                </div>
-                <div>
-                  <strong>9. Case Pack & MOQ Rounding:</strong>{" "}
-                  <code>MOQ: {activeMathItem.minOrderQty}, Pack Size: {activeMathItem.packSize} → {activeMath.recommendedUnits} units ({activeMath.casesCount} cases)</code>
-                </div>
-                <div>
-                  <strong>10. Overstock & Dead Capital:</strong>{" "}
-                  <code>Target ({activeMath.targetStockLevel}) × 1.15 = {activeMath.overstockThreshold} units threshold. {activeMath.isOverstocked ? `Dead Capital: (${activeMath.stockOnHand} OnHand - ${activeMath.targetStockLevel} Target) × $${activeMathItem.unitCost.toFixed(2)} = $${activeMath.deadCashValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Not overstocked"}. (Dead capital is calculated on all units held above your optimal Target Stock Level.)</code>
-                </div>
-              </div>
+              )}
             </BlockStack>
           )}
         </Modal.Section>
