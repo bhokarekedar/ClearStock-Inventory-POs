@@ -24,6 +24,8 @@ import {
   Box,
   Banner,
   Tooltip,
+  ProgressBar,
+  Icon,
   useIndexResourceState,
   type FilterInterface,
   type AppliedFilterInterface,
@@ -39,12 +41,396 @@ import {
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { ClearStockGuideModal } from "../components/ClearStockGuideModal";
+import { SupportModal } from "../components/SupportModal";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent");
 
+  // 1. FULL CATALOG & HISTORICAL ORDERS SYNC FROM SHOPIFY
+  if (intent === "SYNC_SHOPIFY_CATALOG") {
+    try {
+      // 1. Sync Products & Variants (Does NOT require Protected Customer Data approval)
+      const productsResponse = await admin.graphql(`
+        query SyncStoreProducts {
+          products(first: 50) {
+            edges {
+              node {
+                id
+                title
+                vendor
+                productType
+                featuredImage {
+                  url
+                }
+                variants(first: 50) {
+                  edges {
+                    node {
+                      id
+                      title
+                      sku
+                      price
+                      inventoryQuantity
+                      image {
+                        url
+                      }
+                      inventoryItem {
+                        id
+                        unitCost {
+                          amount
+                        }
+                        inventoryLevels(first: 10) {
+                          nodes {
+                            location {
+                              isActive
+                            }
+                            quantities(names: ["available"]) {
+                              name
+                              quantity
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `);
+
+      const productsJson = await productsResponse.json();
+      const productEdges = productsJson.data?.products?.edges || [];
+
+      // 2. Query Orders for sales velocity in an isolated try-catch (Gracefully handles Protected Customer Data restriction)
+      let orderEdges: any[] = [];
+      let pcdNotice: string | null = null;
+
+      try {
+        const ordersResponse = await admin.graphql(`
+          query SyncStoreOrdersVelocity {
+            orders(first: 50, query: "status:open OR status:closed") {
+              edges {
+                node {
+                  id
+                  createdAt
+                  displayFinancialStatus
+                  cancelledAt
+                  lineItems(first: 50) {
+                    edges {
+                      node {
+                        quantity
+                        variant {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `);
+
+        const ordersJson: any = await ordersResponse.json();
+        if (ordersJson.errors && ordersJson.errors.length > 0) {
+          const isPcdError = ordersJson.errors.some((e: any) =>
+            String(e.message || "").toLowerCase().includes("protected") ||
+            String(e.message || "").toLowerCase().includes("not approved to access the order")
+          );
+          if (isPcdError) {
+            pcdNotice =
+              "Historical orders require Protected Customer Data access in your Shopify Partner Dashboard. Live incoming orders will track via webhooks.";
+            console.warn("[Orders Sync Notice]", pcdNotice);
+          } else {
+            console.warn("[Orders Sync Non-Fatal Warning]", ordersJson.errors);
+          }
+        } else {
+          orderEdges = ordersJson.data?.orders?.edges || [];
+        }
+      } catch (orderErr: any) {
+        console.warn("[Orders Query Exception Handled]", orderErr.message);
+        pcdNotice = "Orders access requires Protected Customer Data approval.";
+      }
+
+      // 1. Detect all unique vendors from products
+      const rawVendors = new Set<string>();
+      for (const pEdge of productEdges) {
+        const vName = pEdge.node.vendor?.trim();
+        if (vName) rawVendors.add(vName);
+      }
+      const detectedVendors = Array.from(rawVendors);
+
+      // 2. Ensure supplier exists for each detected vendor or create default
+      const vendorSupplierMap = new Map<string, string>();
+      for (const vName of detectedVendors) {
+        let supplier = await prisma.supplier.findFirst({
+          where: { shop: session.shop, name: vName },
+        });
+        if (!supplier) {
+          supplier = await prisma.supplier.create({
+            data: {
+              shop: session.shop,
+              name: vName,
+              defaultLeadTime: 14,
+              currency: "USD",
+              notes: `Auto-detected vendor from Shopify catalog: ${vName}`,
+            },
+          });
+        }
+        vendorSupplierMap.set(vName, supplier.id);
+      }
+
+      // Default fallback supplier if none exists
+      let defaultSupplier = await prisma.supplier.findFirst({
+        where: { shop: session.shop },
+        orderBy: { createdAt: "asc" },
+      });
+      if (!defaultSupplier) {
+        defaultSupplier = await prisma.supplier.create({
+          data: {
+            shop: session.shop,
+            name: detectedVendors[0] || "Primary Supplier",
+            defaultLeadTime: 14,
+            currency: "USD",
+            notes: "Auto-created during catalog onboarding sync",
+          },
+        });
+      }
+
+      let variantsCount = 0;
+      // 3. Upsert VariantSupplierRules for each variant
+      for (const pEdge of productEdges) {
+        const p = pEdge.node;
+        const assignedSupplierId =
+          (p.vendor && vendorSupplierMap.get(p.vendor.trim())) || defaultSupplier.id;
+
+        for (const vEdge of p.variants?.edges || []) {
+          const v = vEdge.node;
+          variantsCount++;
+
+          let totalAvailable =
+            typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : null;
+          if (totalAvailable === null) {
+            totalAvailable = (v.inventoryItem?.inventoryLevels?.nodes || []).reduce(
+              (sum: number, lvl: any) => {
+                if (lvl.location?.isActive) {
+                  const avail =
+                    lvl.quantities?.find(
+                      (q: any) => !q.name || q.name === "available",
+                    )?.quantity ||
+                    lvl.quantities?.[0]?.quantity ||
+                    0;
+                  return sum + avail;
+                }
+                return sum;
+              },
+              0,
+            );
+          }
+
+          const sku = v.sku || `SKU-${v.id.split("/").pop()}`;
+          const unitCost =
+            parseFloat(v.inventoryItem?.unitCost?.amount || "0") || 0;
+          const imageUrl = v.image?.url || p.featuredImage?.url || null;
+
+          await prisma.variantSupplierRule.upsert({
+            where: {
+              shop_variantId: {
+                shop: session.shop,
+                variantId: v.id,
+              },
+            },
+            update: {
+              productId: p.id,
+              inventoryItemId: v.inventoryItem?.id || null,
+              title: p.title || "Untitled Product",
+              variantTitle: v.title || "",
+              imageUrl,
+              availableStock: totalAvailable ?? 0,
+              unitCost,
+              supplierSku: sku,
+            },
+            create: {
+              shop: session.shop,
+              variantId: v.id,
+              productId: p.id,
+              inventoryItemId: v.inventoryItem?.id || null,
+              title: p.title || "Untitled Product",
+              variantTitle: v.title || "",
+              imageUrl,
+              availableStock: totalAvailable ?? 0,
+              unitCost,
+              supplierSku: sku,
+              supplierId: assignedSupplierId,
+              leadTimeDays: 14,
+              minOrderQty: 1,
+              packSize: 1,
+              safetyStockDays: 7,
+              safetyStockMinimum: 0,
+            },
+          });
+        }
+      }
+
+      // 4. Ingest Orders into DailySalesAggregator
+      let ordersCount = 0;
+      for (const oEdge of orderEdges) {
+        const o = oEdge.node;
+        if (
+          o.cancelledAt ||
+          (o.displayFinancialStatus &&
+            o.displayFinancialStatus !== "PAID" &&
+            o.displayFinancialStatus !== "PARTIALLY_PAID")
+        ) {
+          continue;
+        }
+        ordersCount++;
+
+        const date = new Date(o.createdAt);
+        date.setUTCHours(0, 0, 0, 0);
+
+        for (const itemEdge of o.lineItems?.edges || []) {
+          const item = itemEdge.node;
+          if (!item.variant?.id) continue;
+          const qty = parseInt(String(item.quantity || 0), 10);
+          if (qty <= 0) continue;
+
+          await prisma.dailySalesAggregator.upsert({
+            where: {
+              shop_variantId_date: {
+                shop: session.shop,
+                variantId: item.variant.id,
+                date,
+              },
+            },
+            update: {
+              unitsSold: { increment: qty },
+            },
+            create: {
+              shop: session.shop,
+              variantId: item.variant.id,
+              date,
+              unitsSold: qty,
+            },
+          });
+        }
+      }
+
+      // 5. Update AppSettings
+      await prisma.appSettings.upsert({
+        where: { shop: session.shop },
+        update: {},
+        create: {
+          shop: session.shop,
+          defaultLookbackWindow: 30,
+          defaultSafetyStockDays: 7,
+          defaultLeadTimeDays: 14,
+        },
+      });
+
+      return {
+        ok: true,
+        syncSuccess: true,
+        productsCount: productEdges.length,
+        variantsCount,
+        detectedVendors,
+        ordersCount,
+        pcdNotice,
+      };
+    } catch (err: any) {
+      console.error("[Sync Catalog Error]", err);
+      return { ok: false, error: err.message || "Failed to sync Shopify catalog" };
+    }
+  }
+
+  // 2. SAVE PLAN SELECTION (Step 2)
+  if (intent === "SAVE_PLAN") {
+    const plan = String(formData.get("plan") || "growth");
+    await prisma.appSettings.upsert({
+      where: { shop: session.shop },
+      update: { selectedPlan: plan },
+      create: {
+        shop: session.shop,
+        selectedPlan: plan,
+      },
+    });
+    return { ok: true, planSaved: true, selectedPlan: plan };
+  }
+
+  // 3. ADD / CONFIGURE SUPPLIER (Step 3)
+  if (intent === "ADD_SUPPLIER") {
+    const name = String(formData.get("name") || "").trim();
+    const email = String(formData.get("email") || "").trim();
+    const defaultLeadTime = parseInt(String(formData.get("defaultLeadTime") || "14"), 10);
+    const currency = String(formData.get("currency") || "USD");
+    const notes = String(formData.get("notes") || "").trim();
+
+    if (!name) return { ok: false, error: "Supplier name is required" };
+
+    const supplier = await prisma.supplier.create({
+      data: {
+        shop: session.shop,
+        name,
+        email: email || null,
+        defaultLeadTime: isNaN(defaultLeadTime) ? 14 : defaultLeadTime,
+        currency,
+        notes: notes || null,
+      },
+    });
+
+    // Auto-link any matching variants
+    await prisma.variantSupplierRule.updateMany({
+      where: {
+        shop: session.shop,
+        supplier: {
+          name: { equals: name, mode: "insensitive" },
+        },
+      },
+      data: {
+        supplierId: supplier.id,
+        leadTimeDays: supplier.defaultLeadTime,
+      },
+    });
+
+    return {
+      ok: true,
+      supplierCreated: true,
+      supplierName: supplier.name,
+      supplierId: supplier.id,
+    };
+  }
+
+  // 4. COMPLETE ONBOARDING
+  if (intent === "COMPLETE_ONBOARDING") {
+    await prisma.appSettings.upsert({
+      where: { shop: session.shop },
+      update: { onboardingCompleted: true },
+      create: {
+        shop: session.shop,
+        onboardingCompleted: true,
+      },
+    });
+    return { ok: true, onboardingCompleted: true };
+  }
+
+  // 5. RESET ONBOARDING (to enter wizard anytime)
+  if (intent === "RESET_ONBOARDING") {
+    await prisma.appSettings.upsert({
+      where: { shop: session.shop },
+      update: { onboardingCompleted: false },
+      create: {
+        shop: session.shop,
+        onboardingCompleted: false,
+      },
+    });
+    return { ok: true, onboardingReset: true };
+  }
+
+  // 6. HEAL DATA / LIVE RE-SYNC
   if (intent === "HEAL_DATA") {
     try {
       const response = await admin.graphql(`
@@ -81,19 +467,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       for (const edge of variants) {
         const v = edge.node;
-        let totalAvailable = typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : null;
+        let totalAvailable =
+          typeof v.inventoryQuantity === "number" ? v.inventoryQuantity : null;
 
         if (totalAvailable === null) {
-          totalAvailable = (v.inventoryItem?.inventoryLevels?.nodes || []).reduce(
-            (sum: number, lvl: any) => {
-              if (lvl.location?.isActive) {
-                const avail = lvl.quantities?.find((q: any) => !q.name || q.name === "available")?.quantity || lvl.quantities?.[0]?.quantity || 0;
-                return sum + avail;
-              }
-              return sum;
-            },
-            0,
-          );
+          totalAvailable = (
+            v.inventoryItem?.inventoryLevels?.nodes || []
+          ).reduce((sum: number, lvl: any) => {
+            if (lvl.location?.isActive) {
+              const avail =
+                lvl.quantities?.find(
+                  (q: any) => !q.name || q.name === "available",
+                )?.quantity ||
+                lvl.quantities?.[0]?.quantity ||
+                0;
+              return sum + avail;
+            }
+            return sum;
+          }, 0);
         }
 
         await prisma.variantSupplierRule.updateMany({
@@ -102,12 +493,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variantId: v.id,
           },
           data: {
-            availableStock: totalAvailable,
+            availableStock: totalAvailable ?? 0,
           },
         });
       }
 
-      return { ok: true, syncedCount: variants.length };
+      return { ok: true, healSuccess: true, syncedCount: variants.length };
     } catch (err: any) {
       console.error("[Heal Data Error]", err);
       return { ok: false, error: err.message };
@@ -221,22 +612,47 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  const appSettings = await (prisma as any).appSettings.findFirst({
+  const appSettings = await prisma.appSettings.findFirst({
     where: { shop },
   });
 
-  const defaultLookbackWindow = appSettings?.defaultLookbackWindow ? String(appSettings.defaultLookbackWindow) : "30";
+  const defaultLookbackWindow = appSettings?.defaultLookbackWindow
+    ? String(appSettings.defaultLookbackWindow)
+    : "30";
+
+  // Unique detected vendors
+  const rawVendors = new Set<string>();
+  suppliersDb.forEach((s) => rawVendors.add(s.name));
+  rulesDb.forEach((r) => {
+    if (r.supplier?.name) rawVendors.add(r.supplier.name);
+  });
+
+  const ordersCount = await prisma.dailySalesAggregator.count({
+    where: { shop },
+  });
 
   return {
     items,
-    suppliers: suppliersDb.map((s) => ({ id: s.id, name: s.name })),
-    defaultLookbackWindow: (defaultLookbackWindow === "7" || defaultLookbackWindow === "14" || defaultLookbackWindow === "90" ? defaultLookbackWindow : "30") as "7" | "14" | "30" | "90",
+    suppliers: suppliersDb.map((s) => ({
+      id: s.id,
+      name: s.name,
+      defaultLeadTime: s.defaultLeadTime,
+      email: s.email || "",
+      currency: s.currency || "USD",
+    })),
+    defaultLookbackWindow: (defaultLookbackWindow === "7" ||
+    defaultLookbackWindow === "14" ||
+    defaultLookbackWindow === "90"
+      ? defaultLookbackWindow
+      : "30") as "7" | "14" | "30" | "90",
+    shop,
+    onboardingCompleted: Boolean(appSettings?.onboardingCompleted),
+    selectedPlan: appSettings?.selectedPlan || "growth",
+    detectedVendors: Array.from(rawVendors),
+    ordersCount,
   };
 };
 
-// ---------------------------------------------------------------------------
-// Replenishment Data Types & Interfaces
-// ---------------------------------------------------------------------------
 export interface ReplenishmentItem {
   id: string;
   variantId: string;
@@ -263,13 +679,10 @@ export interface ReplenishmentItem {
   lastSyncDate: string;
 }
 
-
-// ---------------------------------------------------------------------------
-// Pure Deterministic Replenishment Math Helper
-// ---------------------------------------------------------------------------
 export function computeReplenishmentMath(
   item: ReplenishmentItem,
   windowDays: 7 | 14 | 30 | 90 = 30,
+  reorderFrequencyDays: number = 30,
 ) {
   const adsMap = {
     7: item.ads7d,
@@ -279,47 +692,66 @@ export function computeReplenishmentMath(
   };
   const ads = adsMap[windowDays];
 
-  // 1. Lead time demand
+  // 1. Lead time demand (units sold while waiting for supplier delivery)
   const leadTimeDemand = ads * item.leadTimeDays;
 
-  // 2. Safety stock (use days coverage, or unit floor if higher)
+  // 2. Safety stock (buffer for spikes & shipping delays)
   const safetyStockFromDays = ads * item.safetyStockDays;
   const safetyStock = Math.max(
     Math.round(safetyStockFromDays),
     item.safetyStockMinimum,
   );
 
-  // 3. Reorder Point (ROP)
+  // 3. Reorder Point (ROP) - The floor threshold that triggers an order
   const reorderPoint = Math.round(leadTimeDemand + safetyStock);
 
-  // 4. Net Deficit - EXPLICITLY SUBTRACTS BOTH STOCK ON HAND & INCOMING ON POS
-  const rawDeficit = Math.max(0, reorderPoint - item.stockOnHand - item.stockOnOrder);
+  // 4. Cycle Stock (how much stock is sold between PO cycles)
+  const cycleStock = Math.round(ads * reorderFrequencyDays);
 
-  // 5. Apply MOQ & Pack Size multiple
+  // 5. Target Stock Level (Order-Up-To Level = ROP floor + Cycle Stock)
+  const targetStockLevel = Math.round(reorderPoint + cycleStock);
+
+  // 6. Current Stock Position (OnHand + Inbound on POs)
+  const effectiveStock = item.stockOnHand + item.stockOnOrder;
+  const isBelowReorderPoint = effectiveStock <= reorderPoint;
+
+  // 7. Purchase Quantity: Replenish up to Target Stock Level
+  let rawDeficit = 0;
   let recommendedUnits = 0;
   let casesCount = 0;
 
-  if (rawDeficit > 0) {
-    const minUnitsNeeded = Math.max(rawDeficit, item.minOrderQty);
-    casesCount = Math.ceil(minUnitsNeeded / item.packSize);
-    recommendedUnits = casesCount * item.packSize;
+  if (isBelowReorderPoint) {
+    rawDeficit = Math.max(0, targetStockLevel - effectiveStock);
+    if (rawDeficit > 0) {
+      const minUnitsNeeded = Math.max(rawDeficit, item.minOrderQty);
+      casesCount = Math.ceil(minUnitsNeeded / item.packSize);
+      recommendedUnits = casesCount * item.packSize;
+    }
   }
 
-  // Days of current stock on hand (Runway)
-  // If no stock on hand, runway is 0. If no sales velocity (ads == 0), runway is not measurable (0 days, not overstocked).
+  // Days of current stock on hand
   const daysOfCoverageOnHand =
     item.stockOnHand <= 0 ? 0 : ads > 0 ? Math.floor(item.stockOnHand / ads) : 0;
-  const isOverstocked = ads > 0 && daysOfCoverageOnHand > 90;
-  const deadCashValue = isOverstocked ? item.stockOnHand * item.unitCost : 0;
 
-  // "When to buy" Status indicator (Critical, Warning, Info, Success)
+  // 8. Overstock Threshold (Ceiling): Target Stock Level + 15% buffer
+  const overstockThreshold = Math.round(targetStockLevel * 1.15);
+  const isOverstocked = ads > 0 && item.stockOnHand > overstockThreshold;
+  const deadCashValue = isOverstocked
+    ? Math.max(0, item.stockOnHand - targetStockLevel) * item.unitCost
+    : 0;
+
+  // 9. Status Determination:
+  // - Reorder Now: OnHand + OnOrder <= ROP
+  // - Incoming: OnHand <= ROP but OnOrder brings total > ROP
+  // - Overstocked: OnHand > Target Stock Level + 15%
+  // - Stock OK: In healthy zone between ROP and Target Ceiling
   let statusTone: "critical" | "warning" | "info" | "success" = "success";
   let statusLabel: "Reorder Now" | "Overstocked" | "Incoming" | "Stock OK" = "Stock OK";
 
-  if (recommendedUnits > 0 || (item.stockOnHand + item.stockOnOrder) < reorderPoint) {
+  if (effectiveStock <= reorderPoint) {
     statusTone = "critical";
     statusLabel = "Reorder Now";
-  } else if (item.stockOnOrder > 0 && item.stockOnHand < reorderPoint) {
+  } else if (item.stockOnHand <= reorderPoint && item.stockOnOrder > 0) {
     statusTone = "info";
     statusLabel = "Incoming";
   } else if (isOverstocked) {
@@ -336,9 +768,13 @@ export function computeReplenishmentMath(
     leadTimeDemand: Math.round(leadTimeDemand),
     safetyStock,
     reorderPoint,
+    cycleStock,
+    reorderFrequencyDays,
+    targetStockLevel,
+    overstockThreshold,
     stockOnHand: item.stockOnHand,
     stockOnOrder: item.stockOnOrder,
-    effectiveStock: item.stockOnHand + item.stockOnOrder,
+    effectiveStock,
     rawDeficit,
     minOrderQty: item.minOrderQty,
     packSize: item.packSize,
@@ -350,7 +786,7 @@ export function computeReplenishmentMath(
     statusLabel,
     isOverstocked,
     deadCashValue,
-    isBelowReorderPoint: (item.stockOnHand + item.stockOnOrder) < reorderPoint,
+    isBelowReorderPoint,
   };
 }
 
@@ -364,8 +800,40 @@ export default function ReplenishmentDashboard() {
 
   const items = loaderData?.items || [];
   const suppliers = loaderData?.suppliers || [];
+  const shop = loaderData?.shop || "";
 
-  // Filters & Controls
+  // View Mode: default to dashboard ONLY if setup is fully completed and items exist
+  const isFullySetup = Boolean(loaderData?.onboardingCompleted && items.length > 0);
+  const [viewMode, setViewMode] = useState<"dashboard" | "wizard">(
+    isFullySetup ? "dashboard" : "wizard",
+  );
+
+  // Wizard Stepper State (Steps 1 to 4)
+  const [wizardStep, setWizardStep] = useState<number>(() => {
+    if (items.length === 0) return 1;
+    if (suppliers.length === 0) return 3;
+    return 2;
+  });
+
+  // Selected Plan state for Step 2
+  const [chosenPlan, setChosenPlan] = useState<"starter" | "growth" | "scale">(
+    (loaderData?.selectedPlan as any) || "growth",
+  );
+
+  // Modals state
+  const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
+  const [guideDefaultTab, setGuideDefaultTab] = useState<"math" | "pos" | "sync" | "faqs">("math");
+  const [showSupportModal, setShowSupportModal] = useState<boolean>(false);
+  const [showSupplierModal, setShowSupplierModal] = useState<boolean>(false);
+
+  // New Supplier Form State
+  const [newSupplierName, setNewSupplierName] = useState("");
+  const [newSupplierEmail, setNewSupplierEmail] = useState("");
+  const [newSupplierLeadTime, setNewSupplierLeadTime] = useState("14");
+  const [newSupplierCurrency, setNewSupplierCurrency] = useState("USD");
+  const [newSupplierNotes, setNewSupplierNotes] = useState("");
+
+  // Dashboard Filters & Controls
   const [selectedSupplier, setSelectedSupplier] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [rollingWindow, setRollingWindow] = useState<"7" | "14" | "30" | "90">(
@@ -374,19 +842,49 @@ export default function ReplenishmentDashboard() {
   const [filterStatus, setFilterStatus] = useState<
     "all" | "Reorder Now" | "Overstocked" | "Incoming" | "Stock OK"
   >("all");
-  const isHealing = navigation.state === "submitting" && navigation.formData?.get("intent") === "HEAL_DATA";
 
+  const isSyncingCatalog =
+    navigation.state === "submitting" &&
+    navigation.formData?.get("intent") === "SYNC_SHOPIFY_CATALOG";
+  const isHealing =
+    navigation.state === "submitting" &&
+    navigation.formData?.get("intent") === "HEAL_DATA";
+  const isSavingPlan =
+    navigation.state === "submitting" &&
+    navigation.formData?.get("intent") === "SAVE_PLAN";
+  const isAddingSupplier =
+    navigation.state === "submitting" &&
+    navigation.formData?.get("intent") === "ADD_SUPPLIER";
+
+  // Action feedback toasts
   useEffect(() => {
-    if (actionData?.ok) {
-      shopify.toast.show(`Data healed: Re-synced ${actionData.syncedCount} variants across all locations.`);
+    if (actionData?.syncSuccess) {
+      shopify.toast.show(
+        `Synced ${actionData.variantsCount} variants, ${actionData.ordersCount} orders, and detected ${actionData.detectedVendors.length} vendors!`,
+      );
+      setWizardStep(2);
+    } else if (actionData?.planSaved) {
+      shopify.toast.show(`Plan updated to ${actionData.selectedPlan.toUpperCase()}!`);
+      setWizardStep(3);
+    } else if (actionData?.supplierCreated) {
+      shopify.toast.show(`Supplier "${actionData.supplierName}" added!`);
+      setShowSupplierModal(false);
+      setNewSupplierName("");
+      setNewSupplierEmail("");
+    } else if (actionData?.onboardingCompleted) {
+      shopify.toast.show("🎉 Setup completed! Welcome to ClearStock.");
+      setViewMode("dashboard");
+    } else if (actionData?.healSuccess) {
+      shopify.toast.show(
+        `Data healed: Re-synced ${actionData.syncedCount} variants across all locations.`,
+      );
     } else if (actionData?.error) {
-      shopify.toast.show(`Heal failed: ${actionData.error}`, { isError: true });
+      shopify.toast.show(`Error: ${actionData.error}`, { isError: true });
     }
   }, [actionData, shopify]);
 
-  // Modal State
+  // Modal State for Math explanation
   const [activeMathItem, setActiveMathItem] = useState<ReplenishmentItem | null>(null);
-
   const windowDaysNum = parseInt(rollingWindow, 10) as 7 | 14 | 30 | 90;
 
   // Process rows with calculations
@@ -397,18 +895,15 @@ export default function ReplenishmentDashboard() {
     }));
   }, [items, windowDaysNum]);
 
-  // Filtered rows
+  // Filtered rows for Dashboard
   const filteredRows = useMemo(() => {
     return calculatedRows.filter((item) => {
-      // Supplier filter
       if (selectedSupplier !== "all" && item.supplierId !== selectedSupplier) {
         return false;
       }
-      // Status filter
       if (filterStatus !== "all" && item.calc.statusLabel !== filterStatus) {
         return false;
       }
-      // Search filter
       if (searchQuery.trim() !== "") {
         const query = searchQuery.toLowerCase();
         const matchesTitle = item.title.toLowerCase().includes(query);
@@ -426,7 +921,6 @@ export default function ReplenishmentDashboard() {
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(25);
 
-  // Auto-reset to first page when search, supplier, status tab, or page size changes
   useEffect(() => {
     setCurrentPage(1);
   }, [selectedSupplier, filterStatus, searchQuery, pageSize]);
@@ -441,16 +935,16 @@ export default function ReplenishmentDashboard() {
     return filteredRows.slice(startIndex, endIndex);
   }, [filteredRows, startIndex, endIndex]);
 
-  // Index table selection via Polaris useIndexResourceState
   const resourceIDResolver = (item: (typeof filteredRows)[0]) => item.id;
-  const { selectedResources, allResourcesSelected, handleSelectionChange } =
+  const { selectedResources, allResourcesSelected, handleSelectionChange, clearSelection } =
     useIndexResourceState(filteredRows, {
       resourceIDResolver,
     });
 
-  // Aggregated Summary Metrics (including Locked Capital / Overstock Dead Cash)
   const summaryMetrics = useMemo(() => {
-    const itemsNeedingReorder = calculatedRows.filter((r) => r.calc.statusLabel === "Reorder Now");
+    const itemsNeedingReorder = calculatedRows.filter(
+      (r) => r.calc.statusLabel === "Reorder Now",
+    );
     const totalUnitsToOrder = itemsNeedingReorder.reduce(
       (sum, r) => sum + r.calc.recommendedUnits,
       0,
@@ -459,113 +953,70 @@ export default function ReplenishmentDashboard() {
       (sum, r) => sum + r.calc.estimatedCost,
       0,
     );
-    // Locked Capital (Dead Cash) in items exceeding 90 days runway:
-    const lockedCapital = calculatedRows
-      .filter((r) => r.calc.isOverstocked)
-      .reduce((sum, r) => sum + r.calc.deadCashValue, 0);
+    const totalInboundOnPOs = calculatedRows.reduce(
+      (sum, r) => sum + r.stockOnOrder,
+      0,
+    );
+    const overstockedItems = calculatedRows.filter((r) => r.calc.isOverstocked);
+    const totalDeadCash = overstockedItems.reduce(
+      (sum, r) => sum + r.calc.deadCashValue,
+      0,
+    );
 
     return {
-      reorderCount: itemsNeedingReorder.length,
+      needingReorderCount: itemsNeedingReorder.length,
       totalUnitsToOrder,
       totalEstimatedSpend,
-      lockedCapital: lockedCapital || 0,
+      totalInboundOnPOs,
+      activeSkusCount: items.length,
+      overstockedCount: overstockedItems.length,
+      totalDeadCash,
     };
-  }, [calculatedRows]);
+  }, [calculatedRows, items.length]);
 
-  // Supplier Dropdown Options (derived dynamically from database)
   const supplierOptions = useMemo(() => {
     const list = [{ label: "All Suppliers", value: "all" }];
-    if (suppliers.length > 0) {
-      suppliers.forEach((s) => list.push({ label: s.name, value: s.id }));
-    }
+    suppliers.forEach((s) => {
+      list.push({ label: s.name, value: s.id });
+    });
     return list;
   }, [suppliers]);
 
-  // IndexFilters mode
-  const { mode, setMode } = useSetIndexFiltersMode();
-
-  // Tab counts for quick status filtering
-  const tabCounts = useMemo(() => {
-    let reorder = 0;
-    let overstocked = 0;
-    let incoming = 0;
-    let ok = 0;
-    calculatedRows.forEach((item) => {
-      if (item.calc.statusLabel === "Reorder Now") reorder++;
-      else if (item.calc.statusLabel === "Overstocked") overstocked++;
-      else if (item.calc.statusLabel === "Incoming") incoming++;
-      else if (item.calc.statusLabel === "Stock OK") ok++;
-    });
-    return { all: calculatedRows.length, reorder, overstocked, incoming, ok };
-  }, [calculatedRows]);
-
-  const tabs = useMemo(
-    () => [
-      { id: "all", content: "All", badge: String(tabCounts.all), isLocked: true },
-      { id: "reorder", content: "Reorder Now", badge: String(tabCounts.reorder), isLocked: true },
-      { id: "overstocked", content: "Overstocked", badge: String(tabCounts.overstocked), isLocked: true },
-      { id: "incoming", content: "Incoming", badge: String(tabCounts.incoming), isLocked: true },
-      { id: "stock-ok", content: "Stock OK", badge: String(tabCounts.ok), isLocked: true },
-    ],
-    [tabCounts]
-  );
-
-  const tabStatuses = ["all", "Reorder Now", "Overstocked", "Incoming", "Stock OK"] as const;
-  const selectedTab = Math.max(0, tabStatuses.indexOf(filterStatus));
-
-  // Filters for IndexFilters component
-  const filters: FilterInterface[] = [
-    {
-      key: "supplier",
-      label: "Supplier",
-      filter: (
-        <ChoiceList
-          title="Supplier"
-          titleHidden
-          choices={supplierOptions.map((s) => ({ label: s.label, value: s.value }))}
-          selected={[selectedSupplier]}
-          onChange={(val) => setSelectedSupplier(val[0] || "all")}
-        />
-      ),
-      shortcut: true,
-    },
-    {
-      key: "rollingWindow",
-      label: "Sales Window",
-      filter: (
-        <ChoiceList
-          title="Sales Window"
-          titleHidden
-          choices={[
-            { label: "7-Day Sales (Recent)", value: "7" },
-            { label: "14-Day Sales (Steady)", value: "14" },
-            { label: "30-Day Sales (Standard)", value: "30" },
-            { label: "90-Day Sales (Long-term)", value: "90" },
-          ]}
-          selected={[rollingWindow]}
-          onChange={(val) => setRollingWindow((val[0] || "30") as any)}
-        />
-      ),
-      shortcut: true,
-    },
+  const tabStatuses: Array<"all" | "Reorder Now" | "Incoming" | "Overstocked" | "Stock OK"> = [
+    "all",
+    "Reorder Now",
+    "Incoming",
+    "Overstocked",
+    "Stock OK",
   ];
 
-  const appliedFilters: AppliedFilterInterface[] = [];
-  if (selectedSupplier !== "all") {
-    const supName = supplierOptions.find((s) => s.value === selectedSupplier)?.label || selectedSupplier;
-    appliedFilters.push({
-      key: "supplier",
-      label: `Supplier: ${supName}`,
-      onRemove: () => setSelectedSupplier("all"),
+  const selectedTab = tabStatuses.indexOf(filterStatus) !== -1
+    ? tabStatuses.indexOf(filterStatus)
+    : 0;
+
+  const countByStatus = useMemo(() => {
+    const counts = {
+      all: calculatedRows.length,
+      "Reorder Now": 0,
+      Incoming: 0,
+      Overstocked: 0,
+      "Stock OK": 0,
+    };
+    calculatedRows.forEach((r) => {
+      counts[r.calc.statusLabel]++;
     });
-  }
-  if (rollingWindow !== "30") {
-    appliedFilters.push({
-      key: "rollingWindow",
-      label: `Sales: ${rollingWindow}d avg`,
-      onRemove: () => setRollingWindow("30"),
-    });
-  }
+    return counts;
+  }, [calculatedRows]);
+
+  const tabs = [
+    { content: "All Items", id: "tab-all", badge: String(countByStatus.all) },
+    { content: "Reorder Now", id: "tab-reorder", badge: String(countByStatus["Reorder Now"]) },
+    { content: "Incoming", id: "tab-incoming", badge: String(countByStatus.Incoming) },
+    { content: "Overstocked", id: "tab-overstocked", badge: String(countByStatus.Overstocked) },
+    { content: "Stock OK", id: "tab-ok", badge: String(countByStatus["Stock OK"]) },
+  ];
+
+  const { mode, setMode } = useSetIndexFiltersMode();
 
   const handleClearAll = () => {
     setSelectedSupplier("all");
@@ -575,17 +1026,57 @@ export default function ReplenishmentDashboard() {
     setCurrentPage(1);
   };
 
-  // Self-Service Heal Action
   const handleHealData = () => {
     submit({ intent: "HEAL_DATA" }, { method: "post" });
   };
 
-  // Create PO action tied directly to selected rows with multi-supplier guard
+  const handleSyncStoreData = () => {
+    submit({ intent: "SYNC_SHOPIFY_CATALOG" }, { method: "post" });
+  };
+
+  const handleSavePlan = () => {
+    submit({ intent: "SAVE_PLAN", plan: chosenPlan }, { method: "post" });
+  };
+
+  const handleCreateSupplier = (e?: React.FormEvent) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!newSupplierName.trim()) return;
+    submit(
+      {
+        intent: "ADD_SUPPLIER",
+        name: newSupplierName,
+        email: newSupplierEmail,
+        defaultLeadTime: newSupplierLeadTime,
+        currency: newSupplierCurrency,
+        notes: newSupplierNotes,
+      },
+      { method: "post" },
+    );
+  };
+
+  const handleQuickAddVendor = (vendorName: string) => {
+    submit(
+      {
+        intent: "ADD_SUPPLIER",
+        name: vendorName,
+        defaultLeadTime: "14",
+        currency: "USD",
+        notes: `Quick-added from Shopify product vendor "${vendorName}"`,
+      },
+      { method: "post" },
+    );
+  };
+
+  const handleCompleteOnboarding = () => {
+    submit({ intent: "COMPLETE_ONBOARDING" }, { method: "post" });
+  };
+
   const handleCreatePOFromSelected = () => {
     if (selectedResources.length === 0) return;
-
     const selectedItems = items.filter((i) => selectedResources.includes(i.id));
-    const distinctSuppliers = Array.from(new Set(selectedItems.map((i) => i.supplierName)));
+    const distinctSuppliers = Array.from(
+      new Set(selectedItems.map((i) => i.supplierName)),
+    );
 
     if (distinctSuppliers.length > 1) {
       shopify.toast.show(
@@ -595,42 +1086,52 @@ export default function ReplenishmentDashboard() {
       return;
     }
 
-    shopify.toast.show(`Creating Draft Purchase Order with ${selectedResources.length} selected items (${rollingWindow}D velocity)...`);
-    navigate(`/app/purchase-orders/new?items=${selectedResources.join(",")}&window=${rollingWindow}`);
+    shopify.toast.show(
+      `Creating Draft Purchase Order with ${selectedResources.length} items (${rollingWindow}D velocity)...`,
+    );
+    navigate(
+      `/app/purchase-orders/new?items=${selectedResources.join(",")}&window=${rollingWindow}`,
+    );
   };
 
-  // Math details for active modal
   const activeMath = activeMathItem
     ? computeReplenishmentMath(activeMathItem, windowDaysNum)
     : null;
 
   return (
     <Page
-      title="Replenishment"
-      subtitle="Simple, transparent buying recommendations. Always know what to buy and when to buy."
+      title={viewMode === "wizard" ? "ClearStock Onboarding & Setup" : "Replenishment"}
+      subtitle={
+        viewMode === "wizard"
+          ? "Connect your live Shopify catalog, choose your plan, and configure supplier lead times."
+          : "Simple, transparent buying recommendations. Always know what to buy and when to buy."
+      }
       primaryAction={
-        <InlineStack gap="200" align="center">
-          <Tooltip content="Instantly re-syncs recent paid orders from Shopify to verify local sales counts.">
-            <Button
-              icon={RefreshIcon}
-              loading={isHealing}
-              onClick={handleHealData}
-            >
-              Heal Data
+        viewMode === "wizard" ? (
+          items.length > 0 ? (
+            <Button variant="primary" onClick={() => setViewMode("dashboard")}>
+              📊 View Dashboard
             </Button>
-          </Tooltip>
-          <Button
-            variant="primary"
-            onClick={handleCreatePOFromSelected}
-            disabled={selectedResources.length === 0}
-          >
-            {`Create PO from Selected (${selectedResources.length})`}
-          </Button>
-        </InlineStack>
+          ) : undefined
+        ) : undefined
+      }
+      secondaryActions={
+        viewMode === "dashboard"
+          ? [
+              {
+                content: "Heal Data",
+                icon: RefreshIcon,
+                loading: isHealing,
+                onAction: handleHealData,
+                helpText:
+                  "Pulls the latest stock quantities from Shopify across all your locations and refreshes this table.",
+              },
+            ]
+          : undefined
       }
     >
       <style>{`
-        /* 1. Sticky Checkbox Column (Column 1) - Scoped to Replenishment table */
+        /* Sticky Table Columns */
         .clearstock-sticky-table .Polaris-IndexTable__TableHeading:first-child,
         .clearstock-sticky-table .Polaris-IndexTable__TableHeading--first,
         .clearstock-sticky-table .Polaris-IndexTable__TableCell:first-child,
@@ -649,7 +1150,6 @@ export default function ReplenishmentDashboard() {
           background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
         }
 
-        /* 2. Sticky Product & SKU Column (Column 2) - Pinned to left next to checkbox */
         .clearstock-sticky-table .Polaris-IndexTable__TableHeading:nth-child(2),
         .clearstock-sticky-table .Polaris-IndexTable__TableHeading--second,
         .clearstock-sticky-table .Polaris-IndexTable__TableCell:nth-child(2),
@@ -658,825 +1158,1374 @@ export default function ReplenishmentDashboard() {
           left: 48px !important;
           z-index: 23 !important;
           background-color: var(--p-color-bg-surface, #ffffff) !important;
+          box-shadow: 2px 0 4px -1px rgba(0, 0, 0, 0.08) !important;
           min-width: 220px !important;
-          box-shadow: 3px 0 5px -2px rgba(0, 0, 0, 0.12) !important;
-          border-right: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
         }
         .clearstock-sticky-table .Polaris-IndexTable__TableHeading:nth-child(2),
         .clearstock-sticky-table .Polaris-IndexTable__TableHeading--second {
           z-index: 24 !important;
           background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
         }
-
-        /* 3. Solid backgrounds for pinned cells on hover and selection */
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:first-child,
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:nth-child(2),
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:first-child,
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:nth-child(2) {
-          background-color: var(--p-color-bg-surface-hover, #f1f2f3) !important;
-        }
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:first-child,
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:nth-child(2) {
-          background-color: var(--p-color-bg-surface-selected, #f2f7fe) !important;
-        }
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:first-child,
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:nth-child(2) {
-          background-color: var(--p-color-bg-surface-brand-hover, #eaf2fd) !important;
-        }
-
-        /* 4. Pinned Actions / Audit Column (Pinned to Right) */
-        .clearstock-sticky-table .Polaris-IndexTable__TableHeading:last-child,
-        .clearstock-sticky-table .Polaris-IndexTable__TableCell:last-child {
-          position: sticky !important;
-          right: 0 !important;
-          z-index: 22 !important;
-          background-color: var(--p-color-bg-surface, #ffffff) !important;
-          box-shadow: -4px 0 8px -2px rgba(0, 0, 0, 0.08) !important;
-          border-left: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
-          text-align: right !important;
-          min-width: 140px !important;
-        }
-        .clearstock-sticky-table .Polaris-IndexTable__TableHeading:last-child {
-          z-index: 26 !important;
-          background-color: var(--p-color-bg-surface-secondary, #f7f7f7) !important;
-        }
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow:hover .Polaris-IndexTable__TableCell:last-child,
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--hovered .Polaris-IndexTable__TableCell:last-child {
-          background-color: var(--p-color-bg-surface-hover, #f1f2f3) !important;
-        }
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected .Polaris-IndexTable__TableCell:last-child {
-          background-color: var(--p-color-bg-surface-selected, #f2f7fe) !important;
-        }
-        .clearstock-sticky-table .Polaris-IndexTable__TableRow--selected:hover .Polaris-IndexTable__TableCell:last-child {
-          background-color: var(--p-color-bg-surface-brand-hover, #eaf2fd) !important;
-        }
-
-        /* 5. Hide Polaris ghost sticky header which causes duplicate overlapping titles */
-        .Polaris-IndexTable__StickyTableHeader {
-          display: none !important;
-        }
-
-        /* 5. Ensure the table maintains natural, well-spaced column proportions */
-        .Polaris-IndexTable__Table {
-          table-layout: auto !important;
-          width: 100% !important;
-        }
-        .Polaris-IndexTable__TableHeading {
-          white-space: nowrap !important;
-          padding: 8px 12px !important;
-          text-overflow: clip !important;
-        }
-        .Polaris-IndexTable__TableCell {
-          white-space: nowrap !important;
-          padding: 8px 12px !important;
-          vertical-align: middle !important;
-        }
-        .Polaris-IndexTable__TableRow {
-          border-bottom: 1px solid var(--p-color-border-subdued, #e1e3e5) !important;
-        }
       `}</style>
-      <BlockStack gap="400">
-        {/* KPI Strip (4 Summary Cards including Dead Cash Calculator) */}
-        <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="400">
-          {/* Card 1: Reorder Count */}
-          <Card>
-            <BlockStack gap="100">
-              <Text as="h3" variant="headingSm" tone="subdued">
-                Items Below Reorder Point
-              </Text>
-              <InlineStack wrap={false} blockAlign="center" gap="200">
-                <Text as="p" variant="headingLg">
-                  {summaryMetrics.reorderCount}&nbsp;
-                  <Text as="span" variant="bodySm" fontWeight="regular" tone="subdued">
-                    SKUs
+
+      {/* ════════════════════════════════════════════════════════════ */}
+      {/* VIEW 1: ONBOARDING SETUP WIZARD (High-Conversion UX)       */}
+      {/* ════════════════════════════════════════════════════════════ */}
+      {viewMode === "wizard" && (
+        <BlockStack gap="500">
+          {/* Top Quick-Return Bar if already setup */}
+          {items.length > 0 && (
+            <Card padding="400">
+              <InlineStack align="space-between" blockAlign="center" wrap>
+                <InlineStack gap="300" blockAlign="center">
+                  <Badge tone="success">Catalog Connected</Badge>
+                  <Text as="span" variant="bodyMd" tone="subdued">
+                    {items.length} active SKUs and {suppliers.length} suppliers configured.
                   </Text>
-                </Text>
-                <div style={{ flexShrink: 0 }}>
-                  <Badge size="small" tone={summaryMetrics.reorderCount > 0 ? "critical" : "success"}>
-                    {summaryMetrics.reorderCount > 0 ? "Action Required" : "Stock OK"}
-                  </Badge>
-                </div>
+                </InlineStack>
+                <Button size="slim" onClick={() => setViewMode("dashboard")}>
+                  ← Back to Dashboard
+                </Button>
               </InlineStack>
-              <Text as="p" variant="bodyXs" tone="subdued">
-                Items needing restock based on recent sales
-              </Text>
-            </BlockStack>
+            </Card>
+          )}
+
+          {/* Stepper Header Bar */}
+          <Card padding="500">
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                position: "relative",
+              }}
+            >
+              {[
+                { num: 1, label: "1. Sync Catalog" },
+                { num: 2, label: "2. Choose Plan" },
+                { num: 3, label: "3. Primary Supplier" },
+                { num: 4, label: "4. Ready & Restock" },
+              ].map((step, idx) => {
+                const isDone = wizardStep > step.num;
+                const isCurrent = wizardStep === step.num;
+
+                return (
+                  <div
+                    key={step.num}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      flex: idx < 3 ? 1 : undefined,
+                    }}
+                  >
+                    <div
+                      onClick={() => setWizardStep(step.num)}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: "36px",
+                          height: "36px",
+                          borderRadius: "50%",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: "14px",
+                          fontWeight: "700",
+                          backgroundColor: isDone
+                            ? "#108043"
+                            : isCurrent
+                            ? "#008060"
+                            : "#f6f6f7",
+                          color: isDone || isCurrent ? "#ffffff" : "#6d7175",
+                          border: isCurrent ? "2px solid #008060" : "1px solid #d2d5d8",
+                          transition: "all 0.2s ease-in-out",
+                        }}
+                      >
+                        {isDone ? "✓" : step.num}
+                      </div>
+                      <span
+                        style={{
+                          marginTop: "6px",
+                          fontSize: "12px",
+                          fontWeight: isCurrent ? "700" : "500",
+                          color: isCurrent ? "#202223" : "#6d7175",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {step.label}
+                      </span>
+                    </div>
+
+                    {idx < 3 && (
+                      <div
+                        style={{
+                          flex: 1,
+                          height: "2px",
+                          margin: "0 10px 18px 10px",
+                          backgroundColor: isDone ? "#108043" : "#e1e3e5",
+                        }}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </Card>
 
-          {/* Card 2: Total Shortage Units */}
-          <Card>
-            <BlockStack gap="100">
-              <Text as="h3" variant="headingSm" tone="subdued">
-                Total Shortage Units
-              </Text>
-              <InlineStack wrap={false} blockAlign="center" gap="200">
-                <Text as="p" variant="headingLg">
-                  {summaryMetrics.totalUnitsToOrder.toLocaleString()}&nbsp;
-                  <Text as="span" variant="bodySm" fontWeight="regular" tone="subdued">
-                    units
+          {/* STEP 1: SYNC PRODUCTS & ORDERS FROM SHOPIFY */}
+          {wizardStep === 1 && (
+            <Card padding="600">
+              <BlockStack gap="500">
+                <InlineStack align="space-between" blockAlign="center" wrap>
+                  <BlockStack gap="100">
+                    <InlineStack gap="200" blockAlign="center">
+                      <Text as="h2" variant="headingLg">
+                        Step 1: Connect & Sync Store Catalog
+                      </Text>
+                      <Badge tone="info">Shopify is Single Source of Truth</Badge>
+                    </InlineStack>
+                    <Text as="p" tone="subdued">
+                      ClearStock directly queries your live Shopify products, real-time inventory, and past 90-day order velocity.
+                    </Text>
+                  </BlockStack>
+                  <Button
+                    onClick={() => {
+                      setGuideDefaultTab("sync");
+                      setShowGuideModal(true);
+                    }}
+                  >
+                    📖 How Syncing Works
+                  </Button>
+                </InlineStack>
+
+                <Divider />
+
+                <div
+                  style={{
+                    backgroundColor: "#f9fafb",
+                    border: "1px solid #e1e3e5",
+                    borderRadius: "12px",
+                    padding: "24px",
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                    gap: "16px",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: "20px", marginBottom: "4px" }}>📦</div>
+                    <Text as="span" variant="bodyMd" fontWeight="bold">
+                      Products & Variants
+                    </Text>
+                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175" }}>
+                      Pulls title, SKU, images, and live inventory levels across all store locations.
+                    </p>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "20px", marginBottom: "4px" }}>📈</div>
+                    <Text as="span" variant="bodyMd" fontWeight="bold">
+                      Historical Sales Velocity
+                    </Text>
+                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175" }}>
+                      Aggregates past paid orders to compute 7d, 14d, 30d, and 90d Average Daily Sales (ADS).
+                    </p>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "20px", marginBottom: "4px" }}>🏭</div>
+                    <Text as="span" variant="bodyMd" fontWeight="bold">
+                      Auto-Vendor Discovery
+                    </Text>
+                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175" }}>
+                      Detects your brand vendors from Shopify so you can configure lead times with 1 click.
+                    </p>
+                  </div>
+                </div>
+
+                {items.length > 0 && (
+                  <Banner tone="success" title="Store Data Ingested Successfully!">
+                    <p>
+                      Found <strong>{items.length} variants</strong> across{" "}
+                      <strong>{suppliers.length} vendors</strong>. Historical sales velocity has been cached.
+                    </p>
+                  </Banner>
+                )}
+
+                <InlineStack align="end" gap="300">
+                  <Button
+                    variant="primary"
+                    size="large"
+                    loading={isSyncingCatalog}
+                    onClick={handleSyncStoreData}
+                  >
+                    {isSyncingCatalog
+                      ? "Querying Shopify GraphQL..."
+                      : items.length > 0
+                      ? "🔄 Re-Sync Store Data from Shopify"
+                      : "⚡ Connect & Ingest Shopify Catalog"}
+                  </Button>
+
+                  {items.length > 0 && (
+                    <Button variant="secondary" size="large" onClick={() => setWizardStep(2)}>
+                      Continue to Plan Selection →
+                    </Button>
+                  )}
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          )}
+
+          {/* STEP 2: CHOOSE PLAN (High-Conversion SaaS Pricing Tiers) */}
+          {wizardStep === 2 && (
+            <Card padding="600">
+              <BlockStack gap="500">
+                <BlockStack gap="100">
+                  <Text as="h2" variant="headingLg">
+                    Step 2: Choose Your Plan
                   </Text>
-                </Text>
-                <div style={{ flexShrink: 0 }}>
-                  <Badge size="small" tone="attention">Pack Rounded</Badge>
+                  <Text as="p" tone="subdued">
+                    Select the replenishment tier that matches your catalog scale. Upgrade or change anytime.
+                  </Text>
+                </BlockStack>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                    gap: "20px",
+                  }}
+                >
+                  {/* Starter Tier */}
+                  <div
+                    onClick={() => setChosenPlan("starter")}
+                    style={{
+                      border:
+                        chosenPlan === "starter"
+                          ? "2px solid #008060"
+                          : "1px solid #d2d5d8",
+                      borderRadius: "14px",
+                      padding: "24px",
+                      backgroundColor: chosenPlan === "starter" ? "#f0fdf4" : "#ffffff",
+                      cursor: "pointer",
+                      position: "relative",
+                      transition: "all 0.2s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                      <Text as="h3" variant="headingMd">
+                        Starter Plan
+                      </Text>
+                      {chosenPlan === "starter" && <Badge tone="success">Selected</Badge>}
+                    </div>
+                    <div style={{ fontSize: "28px", fontWeight: "800", color: "#202223", margin: "12px 0 6px 0" }}>
+                      $0 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
+                    </div>
+                    <Text as="p" tone="subdued">
+                      Ideal for emerging boutique stores testing inventory automation.
+                    </Text>
+                    <div style={{ marginTop: "16px", borderTop: "1px solid #e1e3e5", paddingTop: "14px" }}>
+                      <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#5c5f62", lineHeight: "1.7" }}>
+                        <li>Up to 50 active SKUs</li>
+                        <li>1 Primary Supplier</li>
+                        <li>30-Day Sales Velocity (ADS)</li>
+                        <li>Automated PO Drafting</li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  {/* Growth Tier (Recommended) */}
+                  <div
+                    onClick={() => setChosenPlan("growth")}
+                    style={{
+                      border:
+                        chosenPlan === "growth"
+                          ? "2px solid #008060"
+                          : "1px solid #d2d5d8",
+                      borderRadius: "14px",
+                      padding: "24px",
+                      backgroundColor: chosenPlan === "growth" ? "#f0fdf4" : "#ffffff",
+                      cursor: "pointer",
+                      position: "relative",
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.06)",
+                      transition: "all 0.2s ease",
+                    }}
+                  >
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: "-12px",
+                        left: "24px",
+                        backgroundColor: "#008060",
+                        color: "#ffffff",
+                        fontSize: "11px",
+                        fontWeight: "700",
+                        padding: "3px 10px",
+                        borderRadius: "12px",
+                      }}
+                    >
+                      ★ MOST POPULAR (14-DAY TRIAL)
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", marginTop: "4px" }}>
+                      <Text as="h3" variant="headingMd">
+                        Growth Plan
+                      </Text>
+                      {chosenPlan === "growth" && <Badge tone="success">Selected</Badge>}
+                    </div>
+                    <div style={{ fontSize: "28px", fontWeight: "800", color: "#202223", margin: "12px 0 6px 0" }}>
+                      $19 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
+                    </div>
+                    <Text as="p" tone="subdued">
+                      Full replenishment power for multi-supplier brands.
+                    </Text>
+                    <div style={{ marginTop: "16px", borderTop: "1px solid #e1e3e5", paddingTop: "14px" }}>
+                      <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#202223", lineHeight: "1.7" }}>
+                        <li><strong>Unlimited SKUs & Variants</strong></li>
+                        <li><strong>Multi-Supplier & Lead Times</strong></li>
+                        <li>7, 14, 30, and 90D Velocity Toggle</li>
+                        <li>Case Pack & MOQ Rounding</li>
+                        <li>One-Click Inbound PO Receiving</li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  {/* Scale Tier */}
+                  <div
+                    onClick={() => setChosenPlan("scale")}
+                    style={{
+                      border:
+                        chosenPlan === "scale"
+                          ? "2px solid #008060"
+                          : "1px solid #d2d5d8",
+                      borderRadius: "14px",
+                      padding: "24px",
+                      backgroundColor: chosenPlan === "scale" ? "#f0fdf4" : "#ffffff",
+                      cursor: "pointer",
+                      position: "relative",
+                      transition: "all 0.2s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                      <Text as="h3" variant="headingMd">
+                        Scale / Enterprise
+                      </Text>
+                      {chosenPlan === "scale" && <Badge tone="success">Selected</Badge>}
+                    </div>
+                    <div style={{ fontSize: "28px", fontWeight: "800", color: "#202223", margin: "12px 0 6px 0" }}>
+                      $49 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
+                    </div>
+                    <Text as="p" tone="subdued">
+                      High-volume operations and multi-location warehouses.
+                    </Text>
+                    <div style={{ marginTop: "16px", borderTop: "1px solid #e1e3e5", paddingTop: "14px" }}>
+                      <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#5c5f62", lineHeight: "1.7" }}>
+                        <li>Everything in Growth</li>
+                        <li>Multi-Location Stock Balancing</li>
+                        <li>Custom Safety Stock Formulas</li>
+                        <li>Priority Developer Support & SLAs</li>
+                      </ul>
+                    </div>
+                  </div>
                 </div>
-              </InlineStack>
-              <Text as="p" variant="bodyXs" tone="subdued">
-                Auto-rounded to supplier pack & MOQ sizes
-              </Text>
-            </BlockStack>
-          </Card>
 
-          {/* Card 3: Estimated Order Cost */}
-          <Card>
-            <BlockStack gap="100">
-              <Text as="h3" variant="headingSm" tone="subdued">
-                Estimated Order Cost
-              </Text>
-              <InlineStack wrap={false} blockAlign="center" gap="200">
-                <Text as="p" variant="headingLg">
-                  ${summaryMetrics.totalEstimatedSpend.toLocaleString("en-US", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}
-                </Text>
-                <div style={{ flexShrink: 0 }}>
-                  <Badge size="small" tone="info">Pre-Tax</Badge>
+                <InlineStack align="space-between" blockAlign="center">
+                  <Button onClick={() => setWizardStep(1)}>← Back</Button>
+                  <Button
+                    variant="primary"
+                    size="large"
+                    loading={isSavingPlan}
+                    onClick={handleSavePlan}
+                  >
+                    Continue with {chosenPlan.toUpperCase()} Plan →
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          )}
+
+          {/* STEP 3: SETUP SUPPLIERS & DETECTED VENDORS */}
+          {wizardStep === 3 && (
+            <Card padding="600">
+              <BlockStack gap="500">
+                <InlineStack align="space-between" blockAlign="center" wrap>
+                  <BlockStack gap="100">
+                    <Text as="h2" variant="headingLg">
+                      Step 3: Setup Primary Supplier & Lead Times
+                    </Text>
+                    <Text as="p" tone="subdued">
+                      Lead time is the number of days between placing an order and when units arrive at your warehouse.
+                    </Text>
+                  </BlockStack>
+                  <Button
+                    variant="primary"
+                    icon={PlusIcon}
+                    onClick={() => setShowSupplierModal(true)}
+                  >
+                    + Add Custom Supplier
+                  </Button>
+                </InlineStack>
+
+                <Divider />
+
+                {/* Detected Vendors from Shopify */}
+                {loaderData?.detectedVendors && loaderData.detectedVendors.length > 0 && (
+                  <Card padding="400">
+                    <BlockStack gap="300">
+                      <InlineStack align="space-between" blockAlign="center">
+                        <Text as="h3" variant="headingSm">
+                          🏷️ Detected Vendors from Your Shopify Products:
+                        </Text>
+                        <Text as="span" variant="bodyXs" tone="subdued">
+                          Click to link lead times instantly
+                        </Text>
+                      </InlineStack>
+                      <InlineStack gap="200" wrap>
+                        {loaderData.detectedVendors.map((vendorName) => {
+                          const alreadyConfigured = suppliers.some(
+                            (s) => s.name.toLowerCase() === vendorName.toLowerCase(),
+                          );
+                          return (
+                            <div
+                              key={vendorName}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "8px",
+                                backgroundColor: alreadyConfigured ? "#f0fdf4" : "#f6f6f7",
+                                border: alreadyConfigured
+                                  ? "1px solid #bbf7d0"
+                                  : "1px solid #d2d5d8",
+                                borderRadius: "8px",
+                                padding: "6px 12px",
+                                fontSize: "13px",
+                              }}
+                            >
+                              <span style={{ fontWeight: "600", color: "#202223" }}>
+                                {vendorName}
+                              </span>
+                              {alreadyConfigured ? (
+                                <Badge tone="success">Connected</Badge>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleQuickAddVendor(vendorName)}
+                                  style={{
+                                    border: "none",
+                                    background: "#008060",
+                                    color: "#ffffff",
+                                    borderRadius: "4px",
+                                    padding: "2px 8px",
+                                    fontSize: "11px",
+                                    fontWeight: "600",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  + Link (14d default)
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </InlineStack>
+                    </BlockStack>
+                  </Card>
+                )}
+
+                {/* Configured Suppliers List */}
+                <BlockStack gap="300">
+                  <Text as="h3" variant="headingSm">
+                    Active Suppliers ({suppliers.length}):
+                  </Text>
+
+                  {suppliers.length === 0 ? (
+                    <div
+                      style={{
+                        padding: "24px",
+                        textAlign: "center",
+                        backgroundColor: "#fafbfc",
+                        borderRadius: "10px",
+                        border: "1px dashed #c9cccf",
+                      }}
+                    >
+                      <Text as="p" tone="subdued">
+                        No suppliers connected yet. Add your primary supplier above or link one of your detected vendors.
+                      </Text>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                      {suppliers.map((sup) => (
+                        <div
+                          key={sup.id}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            padding: "14px 18px",
+                            backgroundColor: "#ffffff",
+                            border: "1px solid #e1e3e5",
+                            borderRadius: "10px",
+                          }}
+                        >
+                          <div>
+                            <Text as="span" variant="bodyMd" fontWeight="bold">
+                              {sup.name}
+                            </Text>
+                            <div style={{ fontSize: "12px", color: "#6d7175", marginTop: "2px" }}>
+                              {sup.email ? `Email: ${sup.email} • ` : ""}
+                              Currency: {sup.currency}
+                            </div>
+                          </div>
+                          <Badge tone="info">{`${sup.defaultLeadTime} Days Lead Time`}</Badge>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </BlockStack>
+
+                <InlineStack align="space-between" blockAlign="center">
+                  <Button onClick={() => setWizardStep(2)}>← Back</Button>
+                  <Button
+                    variant="primary"
+                    size="large"
+                    disabled={suppliers.length === 0}
+                    onClick={() => setWizardStep(4)}
+                  >
+                    Continue to Restock Review →
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          )}
+
+          {/* STEP 4: RESTOCK READY & LAUNCH DASHBOARD */}
+          {wizardStep === 4 && (
+            <Card padding="600">
+              <BlockStack gap="500">
+                <BlockStack gap="100">
+                  <InlineStack gap="200" blockAlign="center">
+                    <Text as="h2" variant="headingLg">
+                      🎉 Step 4: Your Replenishment Engine is Ready!
+                    </Text>
+                    <Badge tone="success">Setup Complete</Badge>
+                  </InlineStack>
+                  <Text as="p" tone="subdued">
+                    ClearStock has reconciled your live catalog against sales velocity and supplier lead times.
+                  </Text>
+                </BlockStack>
+
+                <InlineGrid columns={{ xs: 1, md: 3 }} gap="400">
+                  <Card padding="400">
+                    <BlockStack gap="100">
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Catalog Variants Tracked
+                      </Text>
+                      <Text as="p" variant="headingXl">
+                        {items.length}
+                      </Text>
+                      <Text as="span" variant="bodyXs" tone="success">
+                        100% Synced with Shopify
+                      </Text>
+                    </BlockStack>
+                  </Card>
+
+                  <Card padding="400">
+                    <BlockStack gap="100">
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Connected Suppliers
+                      </Text>
+                      <Text as="p" variant="headingXl">
+                        {suppliers.length}
+                      </Text>
+                      <Text as="span" variant="bodyXs" tone="subdued">
+                        Lead times configured
+                      </Text>
+                    </BlockStack>
+                  </Card>
+
+                  <Card padding="400">
+                    <BlockStack gap="100">
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Items Below Reorder Point
+                      </Text>
+                      <Text
+                        as="p"
+                        variant="headingXl"
+                        tone={summaryMetrics.needingReorderCount > 0 ? "critical" : "success"}
+                      >
+                        {summaryMetrics.needingReorderCount}
+                      </Text>
+                      <Text as="span" variant="bodyXs" tone="subdued">
+                        {summaryMetrics.needingReorderCount > 0
+                          ? "Attention required to prevent stockout"
+                          : "Healthy inventory levels"}
+                      </Text>
+                    </BlockStack>
+                  </Card>
+                </InlineGrid>
+
+                <div
+                  style={{
+                    backgroundColor: "#f0fdf4",
+                    border: "1px solid #bbf7d0",
+                    borderRadius: "12px",
+                    padding: "20px 24px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "16px",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    <h3 style={{ margin: "0 0 4px 0", fontSize: "16px", fontWeight: "700", color: "#166534" }}>
+                      Ready to Automate Your Purchasing?
+                    </h3>
+                    <p style={{ margin: 0, fontSize: "13px", color: "#15803d" }}>
+                      Your replenishment dashboard will recommend reorders, enforce master carton case packs, and send POs directly to your manufacturers.
+                    </p>
+                  </div>
+                  <Button
+                    variant="primary"
+                    size="large"
+                    onClick={handleCompleteOnboarding}
+                  >
+                    🚀 Launch Replenishment Dashboard
+                  </Button>
                 </div>
-              </InlineStack>
-              <Text as="p" variant="bodyXs" tone="subdued">
-                Estimated total cost for required stock
-              </Text>
-            </BlockStack>
-          </Card>
+              </BlockStack>
+            </Card>
+          )}
+        </BlockStack>
+      )}
 
-          {/* Card 4: Dead Cash Calculator (Cash Tied Up) */}
-          <Card>
-            <BlockStack gap="100">
-              <Text as="h3" variant="headingSm" tone="subdued">
-                Cash Tied Up (Overstock)
-              </Text>
-              <InlineStack wrap={false} blockAlign="center" gap="200">
-                <Text as="p" variant="headingLg">
-                  ${summaryMetrics.lockedCapital.toLocaleString("en-US", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}
-                </Text>
-                <div style={{ flexShrink: 0 }}>
-                  <Badge size="small" tone="warning">Overstocked</Badge>
-                </div>
-              </InlineStack>
-              <Text as="p" variant="bodyXs" tone="subdued">
-                Cash trapped in items exceeding 90-day runway.
-              </Text>
-            </BlockStack>
-          </Card>
-        </InlineGrid>
-
-        {/* Data Table with Integrated Native Polaris IndexFilters & Visible Toolbar */}
-        <Card padding="0">
-          <IndexFilters
-            sortOptions={[]}
-            queryValue={searchQuery}
-            queryPlaceholder="Search product, variant, or SKU..."
-            onQueryChange={setSearchQuery}
-            onQueryClear={() => setSearchQuery("")}
-            onClearAll={handleClearAll}
-            tabs={tabs}
-            selected={selectedTab}
-            onSelect={(index) => setFilterStatus(tabStatuses[index])}
-            filters={[]}
-            appliedFilters={[]}
-            mode={mode}
-            setMode={setMode}
-            canCreateNewView={false}
-          />
-
-          {/* Always-visible Multi-filter Toolbar */}
-          <Box padding="300" borderBlockStartWidth="025" borderColor="border-secondary" background="bg-surface-secondary">
-            <InlineStack align="space-between" blockAlign="center" gap="400" wrap>
-              <InlineStack gap="400" blockAlign="center" wrap>
-                {/* 1. Supplier Filter */}
-                <div style={{ minWidth: "220px" }}>
-                  <Select
-                    label="Supplier"
-                    labelInline
-                    options={supplierOptions}
-                    value={selectedSupplier}
-                    onChange={(val) => setSelectedSupplier(val)}
-                  />
-                </div>
-
-                {/* 2. Sales Lookback Window Segmented Buttons */}
-                <InlineStack gap="200" blockAlign="center">
+      {/* ════════════════════════════════════════════════════════════ */}
+      {/* VIEW 2: LIVE REPLENISHMENT DASHBOARD                         */}
+      {/* ════════════════════════════════════════════════════════════ */}
+      {viewMode === "dashboard" && (
+        <BlockStack gap="500">
+          {/* KPI Summary Cards */}
+          <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="400">
+            <Card padding="400">
+              <BlockStack gap="100">
+                <InlineStack align="space-between" blockAlign="center">
                   <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
-                    Sales Window:
+                    Reorder Now
                   </Text>
-                  <ButtonGroup variant="segmented">
+                  <Tooltip content="Products running low: Current stock plus incoming orders aren't enough to cover sales while waiting for delivery.">
+                    <Icon source={InfoIcon} tone="subdued" />
+                  </Tooltip>
+                </InlineStack>
+                <Text
+                  as="p"
+                  variant="headingXl"
+                  fontWeight="bold"
+                  tone={summaryMetrics.needingReorderCount > 0 ? "critical" : "success"}
+                >
+                  {summaryMetrics.needingReorderCount}
+                </Text>
+                <Text as="span" variant="bodyXs" tone="subdued">
+                  {summaryMetrics.needingReorderCount > 0
+                    ? `Order ${summaryMetrics.totalUnitsToOrder.toLocaleString()} units (~$${summaryMetrics.totalEstimatedSpend.toFixed(0)})`
+                    : "No stockout risks detected."}
+                </Text>
+              </BlockStack>
+            </Card>
+
+            <Card padding="400">
+              <BlockStack gap="100">
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
+                    Incoming (On Order)
+                  </Text>
+                  <Tooltip content="Units already bought: Total items across active purchase orders that haven't arrived at your door yet.">
+                    <Icon source={InfoIcon} tone="subdued" />
+                  </Tooltip>
+                </InlineStack>
+                <Text as="p" variant="headingXl" fontWeight="bold">
+                  {summaryMetrics.totalInboundOnPOs.toLocaleString()}
+                </Text>
+                <Text as="span" variant="bodyXs" tone="subdued">
+                  Units in transit on active POs
+                </Text>
+              </BlockStack>
+            </Card>
+
+            <Card padding="400">
+              <BlockStack gap="100">
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
+                    Active Catalog SKUs
+                  </Text>
+                  <Tooltip content="Active items: Total products configured with suppliers and reorder rules.">
+                    <Icon source={InfoIcon} tone="subdued" />
+                  </Tooltip>
+                </InlineStack>
+                <Text as="p" variant="headingXl" fontWeight="bold">
+                  {summaryMetrics.activeSkusCount}
+                </Text>
+                <Text as="span" variant="bodyXs" tone="subdued">
+                  Across {suppliers.length} suppliers
+                </Text>
+              </BlockStack>
+            </Card>
+
+            <Card padding="400">
+              <BlockStack gap="100">
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
+                    Overstocked
+                  </Text>
+                  <Tooltip content="Overstocked value: Cash tied up in products that exceed your Target Stock Level ceiling (+15% buffer).">
+                    <Icon source={InfoIcon} tone="subdued" />
+                  </Tooltip>
+                </InlineStack>
+                <Text
+                  as="p"
+                  variant="headingXl"
+                  fontWeight="bold"
+                  tone={summaryMetrics.totalDeadCash > 0 ? "caution" : "subdued"}
+                >
+                  ${summaryMetrics.totalDeadCash.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                </Text>
+                <Text as="span" variant="bodyXs" tone="subdued">
+                  {summaryMetrics.overstockedCount > 0
+                    ? `${summaryMetrics.overstockedCount} SKUs overstocked`
+                    : "Zero overstocked items"}
+                </Text>
+              </BlockStack>
+            </Card>
+          </InlineGrid>
+
+          {/* Data Table with IndexFilters & Toolbar */}
+          <Card padding="0">
+            <IndexFilters
+              sortOptions={[]}
+              queryValue={searchQuery}
+              queryPlaceholder="Search product, variant, or SKU..."
+              onQueryChange={setSearchQuery}
+              onQueryClear={() => setSearchQuery("")}
+              onClearAll={handleClearAll}
+              tabs={tabs}
+              selected={selectedTab}
+              onSelect={(index) => setFilterStatus(tabStatuses[index])}
+              filters={[]}
+              appliedFilters={[]}
+              mode={mode}
+              setMode={setMode}
+              canCreateNewView={false}
+            />
+
+            {/* Toolbar */}
+            <Box
+              padding="300"
+              borderBlockStartWidth="025"
+              borderColor="border-secondary"
+              background="bg-surface-secondary"
+            >
+              <InlineStack align="space-between" blockAlign="center" gap="400" wrap>
+                <InlineStack gap="400" blockAlign="center" wrap>
+                  <div style={{ minWidth: "220px" }}>
+                    <Select
+                      label="Supplier"
+                      labelInline
+                      options={supplierOptions}
+                      value={selectedSupplier}
+                      onChange={(val) => setSelectedSupplier(val)}
+                    />
+                  </div>
+
+                  <InlineStack gap="200" blockAlign="center">
+                    <Text as="span" variant="bodySm" tone="subdued" fontWeight="medium">
+                      Sales Window:
+                    </Text>
+                    <ButtonGroup variant="segmented">
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "7"}
+                        onClick={() => setRollingWindow("7")}
+                      >
+                        7D
+                      </Button>
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "14"}
+                        onClick={() => setRollingWindow("14")}
+                      >
+                        14D
+                      </Button>
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "30"}
+                        onClick={() => setRollingWindow("30")}
+                      >
+                        30D
+                      </Button>
+                      <Button
+                        size="slim"
+                        pressed={rollingWindow === "90"}
+                        onClick={() => setRollingWindow("90")}
+                      >
+                        90D
+                      </Button>
+                    </ButtonGroup>
+                  </InlineStack>
+                </InlineStack>
+
+                <InlineStack gap="200" blockAlign="center">
+                  <Button
+                    size="slim"
+                    onClick={() => {
+                      setGuideDefaultTab("math");
+                      setShowGuideModal(true);
+                    }}
+                  >
+                    🧮 How Calculations Work
+                  </Button>
+                </InlineStack>
+              </InlineStack>
+            </Box>
+
+            {/* IndexTable */}
+            <div className="clearstock-sticky-table" style={{ overflowX: "auto" }}>
+              <IndexTable
+                resourceName={{ singular: "item", plural: "items" }}
+                itemCount={totalItems}
+                selectedItemsCount={
+                  allResourcesSelected ? "All" : selectedResources.length
+                }
+                onSelectionChange={handleSelectionChange}
+                promotedBulkActions={[
+                  {
+                    content: `Create PO from Selected (${selectedResources.length})`,
+                    onAction: handleCreatePOFromSelected,
+                  },
+                ]}
+                headings={[
+                  { title: "Product & SKU" },
+                  { title: "Supplier" },
+                  { title: `Velocity (${rollingWindow}d ADS)` },
+                  { title: "Stock on Hand" },
+                  { title: "On Order" },
+                  { title: "Reorder Point" },
+                  { title: "Recommended PO" },
+                  { title: "Status" },
+                  { title: "Details" },
+                ]}
+              >
+                {paginatedRows.length === 0 ? (
+                  <IndexTable.Row id="empty-row" position={0}>
+                    <IndexTable.Cell colSpan={9}>
+                      <div style={{ textAlign: "center", padding: "40px" }}>
+                        <Text as="p" variant="bodyMd" tone="subdued">
+                          {searchQuery || selectedSupplier !== "all" || filterStatus !== "all"
+                            ? "No items match your filter criteria."
+                            : "No replenishment items configured yet."}
+                        </Text>
+                      </div>
+                    </IndexTable.Cell>
+                  </IndexTable.Row>
+                ) : (
+                  paginatedRows.map((row, index) => {
+                    const isSelected = selectedResources.includes(row.id);
+                    const calc = row.calc;
+
+                    return (
+                      <IndexTable.Row
+                        id={row.id}
+                        key={row.id}
+                        selected={isSelected}
+                        position={index}
+                      >
+                        <IndexTable.Cell>
+                          <InlineStack gap="300" blockAlign="center" wrap={false}>
+                            {row.imageUrl ? (
+                              <Thumbnail source={row.imageUrl} alt={row.title} size="small" />
+                            ) : (
+                              <div
+                                style={{
+                                  width: "40px",
+                                  height: "40px",
+                                  backgroundColor: "#f4f6f8",
+                                  borderRadius: "6px",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  fontSize: "18px",
+                                }}
+                              >
+                                📦
+                              </div>
+                            )}
+                            <BlockStack gap="050">
+                              <Text as="span" variant="bodySm" fontWeight="bold">
+                                {row.title}
+                              </Text>
+                              {row.variantTitle && (
+                                <Text as="span" variant="bodyXs" tone="subdued">
+                                  {row.variantTitle}
+                                </Text>
+                              )}
+                              <Text as="span" variant="bodyXs" tone="subdued">
+                                SKU: {row.sku || "N/A"}
+                              </Text>
+                            </BlockStack>
+                          </InlineStack>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={`Delivery speed: It takes about ${row.leadTimeDays} days from the day you order from ${row.supplierName} until items arrive at your door.`}
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help" }}>
+                              <Text as="span" variant="bodySm">
+                                {row.supplierName}
+                              </Text>
+                              <Text as="p" variant="bodyXs" tone="subdued">
+                                {row.leadTimeDays}d lead time
+                              </Text>
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={`How fast it sells: You're selling about ${calc.ads} units a day, based on ${row.unitsSold30d} total sales over the last 30 days.`}
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help" }}>
+                              <Text as="span" variant="bodySm" fontWeight="bold">
+                                {calc.ads} units/d
+                              </Text>
+                              <Text as="p" variant="bodyXs" tone="subdued">
+                                {row.unitsSold30d} sold in 30d
+                              </Text>
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={`What's left: You have ${row.stockOnHand.toLocaleString()} units available. Selling ${calc.ads} per day, this will last roughly ${calc.daysOfCoverageOnHand} days before you run out.`}
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help" }}>
+                              <Text as="span" variant="bodySm" fontWeight="bold">
+                                {row.stockOnHand.toLocaleString()}
+                              </Text>
+                              <Text as="p" variant="bodyXs" tone="subdued">
+                                {calc.daysOfCoverageOnHand > 0
+                                  ? `${calc.daysOfCoverageOnHand}d runway`
+                                  : "0d runway"}
+                              </Text>
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={
+                              row.stockOnOrder > 0
+                                ? `Units already bought: You have ${row.stockOnOrder} units across active purchase orders. We count these so you don't accidentally order the same stock twice.`
+                                : "No units on order: You don't have any pending purchase orders for this item."
+                            }
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help", display: "inline-block" }}>
+                              {row.stockOnOrder > 0 ? (
+                                <Badge tone="info">{`+${row.stockOnOrder}`}</Badge>
+                              ) : (
+                                <Text as="span" variant="bodySm" tone="subdued">
+                                  —
+                                </Text>
+                              )}
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={`Order trigger (floor): When total stock drops to ${calc.reorderPoint} units, place an order. Covers sales during ${row.leadTimeDays}d delivery (${calc.leadTimeDemand} units) plus safety buffer (${calc.safetyStock} units).`}
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help" }}>
+                              <Text as="span" variant="bodySm" fontWeight="bold">
+                                {calc.reorderPoint}
+                              </Text>
+                              <Text as="p" variant="bodyXs" tone="subdued">
+                                Safety: {calc.safetyStock}
+                              </Text>
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={
+                              calc.recommendedUnits > 0
+                                ? `Suggested buy: You need ${calc.rawDeficit} units to replenish up to your Target Stock Level (${calc.targetStockLevel} units = ROP ${calc.reorderPoint} + ${calc.cycleStock} cycle stock). Adjusted to ${calc.recommendedUnits} units (${calc.casesCount} box${calc.casesCount === 1 ? "" : "es"}) to match supplier MOQ and case pack rules.`
+                                : `No order needed: Your stock (${row.stockOnHand}) and incoming orders (${row.stockOnOrder}) are above your order trigger (${calc.reorderPoint} units).`
+                            }
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help" }}>
+                              {calc.recommendedUnits > 0 ? (
+                                <BlockStack gap="050">
+                                  <Text as="span" variant="bodySm" fontWeight="bold" tone="critical">
+                                    {calc.recommendedUnits} units
+                                  </Text>
+                                  <Text as="span" variant="bodyXs" tone="subdued">
+                                    {calc.casesCount} cases (MOQ {row.minOrderQty})
+                                  </Text>
+                                </BlockStack>
+                              ) : (
+                                <Text as="span" variant="bodySm" tone="subdued">
+                                  0 units
+                                </Text>
+                              )}
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <Tooltip
+                            content={
+                              calc.statusLabel === "Reorder Now"
+                                ? `⚠️ Time to order. You have ${row.stockOnHand} in stock and ${row.stockOnOrder} on the way (total ${calc.effectiveStock}), which is at or below your order trigger (${calc.reorderPoint}). Order ${calc.recommendedUnits} units to restock up to your target level.`
+                                : calc.statusLabel === "Incoming"
+                                ? `🚚 Stock is on the way. Shelf stock (${row.stockOnHand}) is low, but ${row.stockOnOrder} incoming units already ordered will bring total stock to ${calc.effectiveStock}, covering your needs.`
+                                : calc.statusLabel === "Overstocked"
+                                ? `📦 Overstocked. You have ${row.stockOnHand.toLocaleString()} units on hand, which exceeds your Target Stock Level ceiling of ${calc.targetStockLevel} units (+15% buffer). Holding extra stock ties up your cash.`
+                                : `✅ You're in good shape. Your total stock (${calc.effectiveStock}) is safely above your order trigger (${calc.reorderPoint}) and within your target ceiling (${calc.targetStockLevel}). No need to order right now.`
+                            }
+                            dismissOnMouseOut
+                          >
+                            <div style={{ cursor: "help", display: "inline-block" }}>
+                              <Badge tone={calc.statusTone}>{calc.statusLabel}</Badge>
+                            </div>
+                          </Tooltip>
+                        </IndexTable.Cell>
+
+                        <IndexTable.Cell>
+                          <InlineStack gap="150" blockAlign="center">
+                            {calc.recommendedUnits > 0 && (
+                              <Button
+                                size="slim"
+                                variant="primary"
+                                onClick={() => {
+                                  navigate(
+                                    `/app/purchase-orders/new?items=${row.id}&window=${rollingWindow}`,
+                                  );
+                                }}
+                              >
+                                Draft PO
+                              </Button>
+                            )}
+                            <Button size="slim" onClick={() => setActiveMathItem(row)}>
+                              Inspect
+                            </Button>
+                          </InlineStack>
+                        </IndexTable.Cell>
+                      </IndexTable.Row>
+                    );
+                  })
+                )}
+              </IndexTable>
+            </div>
+
+            {/* Pagination footer */}
+            <Box padding="400" borderBlockStartWidth="025" borderColor="border-secondary">
+              <InlineStack align="space-between" blockAlign="center" wrap>
+                <Text as="span" variant="bodySm" tone="subdued">
+                  Showing {totalItems > 0 ? startIndex + 1 : 0}–{endIndex} of {totalItems} items
+                </Text>
+                <InlineStack gap="300" blockAlign="center">
+                  <Select
+                    label="Per page"
+                    labelInline
+                    options={[
+                      { label: "10", value: "10" },
+                      { label: "25", value: "25" },
+                      { label: "50", value: "50" },
+                      { label: "100", value: "100" },
+                    ]}
+                    value={String(pageSize)}
+                    onChange={(val) => setPageSize(parseInt(val, 10))}
+                  />
+                  <ButtonGroup>
                     <Button
                       size="slim"
-                      pressed={rollingWindow === "7"}
-                      onClick={() => setRollingWindow("7")}
+                      disabled={safeCurrentPage <= 1}
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                     >
-                      7D
+                      Previous
                     </Button>
                     <Button
                       size="slim"
-                      pressed={rollingWindow === "14"}
-                      onClick={() => setRollingWindow("14")}
+                      disabled={safeCurrentPage >= totalPages}
+                      onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                     >
-                      14D
-                    </Button>
-                    <Button
-                      size="slim"
-                      pressed={rollingWindow === "30"}
-                      onClick={() => setRollingWindow("30")}
-                    >
-                      30D
-                    </Button>
-                    <Button
-                      size="slim"
-                      pressed={rollingWindow === "90"}
-                      onClick={() => setRollingWindow("90")}
-                    >
-                      90D
+                      Next
                     </Button>
                   </ButtonGroup>
                 </InlineStack>
               </InlineStack>
-
-              <InlineStack gap="300" blockAlign="center" wrap>
-                {/* Page Size Selector */}
-                <InlineStack gap="150" blockAlign="center">
-                  <Text as="span" variant="bodySm" tone="subdued">
-                    Rows:
-                  </Text>
-                  <div style={{ width: "115px" }}>
-                    <Select
-                      label="Rows per page"
-                      labelHidden
-                      options={[
-                        { label: "25 / page", value: "25" },
-                        { label: "50 / page", value: "50" },
-                        { label: "100 / page", value: "100" },
-                      ]}
-                      value={String(pageSize)}
-                      onChange={(val) => setPageSize(parseInt(val, 10))}
-                    />
-                  </div>
-                </InlineStack>
-
-                {/* Reset Action if any filter is active */}
-                {(selectedSupplier !== "all" || rollingWindow !== (loaderData?.defaultLookbackWindow || "30") || searchQuery.trim() !== "") && (
-                  <Button
-                    variant="plain"
-                    tone="critical"
-                    size="slim"
-                    onClick={handleClearAll}
-                  >
-                    Reset All Filters
-                  </Button>
-                )}
-              </InlineStack>
-            </InlineStack>
-          </Box>
-
-          <div className="clearstock-sticky-table">
-            <IndexTable
-              resourceName={{
-                singular: "inventory item",
-                plural: "inventory items",
-              }}
-              itemCount={filteredRows.length}
-              selectedItemsCount={
-                allResourcesSelected ? "All" : selectedResources.length
-              }
-              onSelectionChange={handleSelectionChange}
-              pagination={{
-                hasNext: safeCurrentPage < totalPages,
-                hasPrevious: safeCurrentPage > 1,
-                onNext: () => setCurrentPage((p) => Math.min(p + 1, totalPages)),
-                onPrevious: () => setCurrentPage((p) => Math.max(p - 1, 1)),
-                label: totalItems > 0 ? `${startIndex + 1}–${endIndex} of ${totalItems} items` : "0 items",
-              }}
-              headings={[
-                { title: "Product & SKU" },
-                { title: "Status" },
-                { title: "Supplier" },
-                { title: "Stock & Runway" },
-                { title: "Daily Sales (Avg)" },
-                { title: "Recommended Order", alignment: "end" },
-              ]}
-            >
-              {paginatedRows.map((row, index) => {
-                const { calc } = row;
-                const isSelected = selectedResources.includes(row.id);
-
-                return (
-                  <IndexTable.Row
-                    id={row.id}
-                    key={row.id}
-                    selected={isSelected}
-                    position={startIndex + index}
-                  >
-                  {/* Product Details (Compact 2 lines) */}
-                  <IndexTable.Cell>
-                    <div style={{ minWidth: "210px" }}>
-                      <InlineStack gap="200" blockAlign="center" wrap={false}>
-                        <Thumbnail
-                          source={row.imageUrl}
-                          alt={row.title}
-                          size="small"
-                        />
-                        <BlockStack gap="025">
-                          <Text as="span" variant="bodySm" fontWeight="semibold">
-                            {row.title}
-                          </Text>
-                          <Text as="span" variant="bodyXs" tone="subdued">
-                            {row.sku} · {row.variantTitle}
-                          </Text>
-                        </BlockStack>
-                      </InlineStack>
-                    </div>
-                  </IndexTable.Cell>
-
-                  {/* Status Column */}
-                  <IndexTable.Cell>
-                    <div style={{ minWidth: "100px" }}>
-                      <Badge tone={calc.statusTone} size="small">{calc.statusLabel}</Badge>
-                    </div>
-                  </IndexTable.Cell>
-
-                  {/* Supplier */}
-                  <IndexTable.Cell>
-                    <div style={{ minWidth: "120px" }}>
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        {row.supplierName}
-                      </Text>
-                    </div>
-                  </IndexTable.Cell>
-
-                  {/* Stock & Runway (Clean 2 lines: Stock & Badge on Line 1, Incoming on Line 2) */}
-                  <IndexTable.Cell>
-                    <div style={{ minWidth: "130px" }}>
-                      <BlockStack gap="050">
-                        <InlineStack gap="150" blockAlign="center">
-                          <Text
-                            as="span"
-                            variant="bodySm"
-                            fontWeight="bold"
-                            tone={
-                              calc.statusLabel === "Reorder Now"
-                                ? "critical"
-                                : calc.statusLabel === "Overstocked"
-                                ? "caution"
-                                : "base"
-                            }
-                          >
-                            {row.stockOnHand}
-                          </Text>
-                          {row.stockOnHand <= 0 ? (
-                            <Badge tone="critical" size="small">
-                              0d left
-                            </Badge>
-                          ) : calc.ads === 0 ? (
-                            <Badge tone="info" size="small">
-                              No sales
-                            </Badge>
-                          ) : calc.daysOfCoverageOnHand <= 7 ? (
-                            <Badge tone="critical" size="small">
-                              {`${calc.daysOfCoverageOnHand}d left`}
-                            </Badge>
-                          ) : calc.daysOfCoverageOnHand <= 14 ? (
-                            <Badge tone="attention" size="small">
-                              {`${calc.daysOfCoverageOnHand}d left`}
-                            </Badge>
-                          ) : calc.isOverstocked ? (
-                            <Badge tone="warning" size="small">
-                              {`${calc.daysOfCoverageOnHand > 365 ? "365+d" : calc.daysOfCoverageOnHand + "d"}`}
-                            </Badge>
-                          ) : (
-                            <Badge tone="success" size="small">
-                              {`${calc.daysOfCoverageOnHand > 60 ? "60+d" : calc.daysOfCoverageOnHand + "d"}`}
-                            </Badge>
-                          )}
-                        </InlineStack>
-
-                        {row.stockOnOrder > 0 ? (
-                          <Text as="span" variant="bodyXs" tone="subdued">
-                            ↳ +{row.stockOnOrder} incoming
-                          </Text>
-                        ) : (
-                          <Text as="span" variant="bodyXs" tone="subdued">
-                            0 incoming
-                          </Text>
-                        )}
-                      </BlockStack>
-                    </div>
-                  </IndexTable.Cell>
-
-                  {/* Daily Sales (Avg) */}
-                  <IndexTable.Cell>
-                    <div style={{ minWidth: "100px" }}>
-                      <BlockStack gap="025">
-                        <Text as="span" variant="bodySm" fontWeight="medium">
-                          {`${calc.ads.toFixed(1)} /day`}
-                        </Text>
-                        <Text as="span" variant="bodyXs" tone="subdued">
-                          {`${rollingWindow}d avg`}
-                        </Text>
-                      </BlockStack>
-                    </div>
-                  </IndexTable.Cell>
-
-                  {/* Recommended Order & View Math Link */}
-                  <IndexTable.Cell>
-                    <div style={{ minWidth: "140px", textAlign: "right" }}>
-                      <BlockStack gap="025" inlineAlign="end">
-                        {calc.recommendedUnits > 0 ? (
-                          <Text as="span" variant="bodySm" fontWeight="bold" tone="critical">
-                            {`${calc.recommendedUnits.toLocaleString()} units`}
-                          </Text>
-                        ) : calc.isOverstocked ? (
-                          <Text as="span" variant="bodySm" fontWeight="medium" tone="caution">
-                            0 units (Overstock)
-                          </Text>
-                        ) : (
-                          <Text as="span" variant="bodySm" tone="subdued">
-                            0 units
-                          </Text>
-                        )}
-                        <Button
-                          variant="plain"
-                          size="micro"
-                          onClick={() => setActiveMathItem(row)}
-                        >
-                          View math ⓘ
-                        </Button>
-                      </BlockStack>
-                    </div>
-                  </IndexTable.Cell>
-                </IndexTable.Row>
-              );
-            })}
-          </IndexTable>
-          </div>
-
-          {filteredRows.length === 0 && (
-            <Box padding="600">
-              <BlockStack align="center" inlineAlign="center" gap="200">
-                <Text as="p" variant="bodyMd" tone="subdued">
-                  No inventory items match the current filters.
-                </Text>
-                <Button
-                  onClick={() => {
-                    setSelectedSupplier("all");
-                    setFilterStatus("all");
-                    setSearchQuery("");
-                  }}
-                >
-                  Clear all filters
-                </Button>
-              </BlockStack>
             </Box>
-          )}
-        </Card>
-      </BlockStack>
+          </Card>
+        </BlockStack>
+      )}
 
-      {/* --------------------------------------------------------------------- */}
-      {/* "SHOW THE MATH" MODAL - COMPLETE TRANSPARENCY & ROI CALCULATIONS       */}
-      {/* --------------------------------------------------------------------- */}
+      {/* ════════════════════════════════════════════════════════════ */}
+      {/* MODALS & OVERLAYS                                            */}
+      {/* ════════════════════════════════════════════════════════════ */}
+
+      {/* 1. Add Supplier Modal (Step 3 or Header) */}
+      <Modal
+        open={showSupplierModal}
+        onClose={() => setShowSupplierModal(false)}
+        title="Add New Supplier"
+        primaryAction={{
+          content: isAddingSupplier ? "Saving..." : "Save Supplier",
+          disabled: !newSupplierName.trim() || isAddingSupplier,
+          onAction: handleCreateSupplier,
+        }}
+        secondaryActions={[
+          {
+            content: "Cancel",
+            onAction: () => setShowSupplierModal(false),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <form onSubmit={handleCreateSupplier}>
+            <BlockStack gap="400">
+              <TextField
+                label="Supplier Name"
+                value={newSupplierName}
+                onChange={setNewSupplierName}
+                placeholder="e.g. Apex Apparel Ltd."
+                autoComplete="off"
+                requiredIndicator
+              />
+              <TextField
+                label="Contact Email"
+                type="email"
+                value={newSupplierEmail}
+                onChange={setNewSupplierEmail}
+                placeholder="orders@apexapparel.com"
+                autoComplete="off"
+                helpText="Purchase order PDFs will be addressed to this email."
+              />
+              <InlineGrid columns={{ xs: 1, md: 2 }} gap="300">
+                <TextField
+                  label="Default Lead Time (Days)"
+                  type="number"
+                  value={newSupplierLeadTime}
+                  onChange={setNewSupplierLeadTime}
+                  autoComplete="off"
+                  helpText="Total calendar days from PO placement to delivery."
+                />
+                <Select
+                  label="Currency"
+                  options={[
+                    { label: "USD ($)", value: "USD" },
+                    { label: "CAD ($)", value: "CAD" },
+                    { label: "EUR (€)", value: "EUR" },
+                    { label: "GBP (£)", value: "GBP" },
+                    { label: "AUD ($)", value: "AUD" },
+                  ]}
+                  value={newSupplierCurrency}
+                  onChange={setNewSupplierCurrency}
+                />
+              </InlineGrid>
+              <TextField
+                label="Notes / Terms"
+                value={newSupplierNotes}
+                onChange={setNewSupplierNotes}
+                multiline={2}
+                placeholder="Payment terms: Net 30. Port of entry: Los Angeles."
+                autoComplete="off"
+              />
+            </BlockStack>
+          </form>
+        </Modal.Section>
+      </Modal>
+
+      {/* 2. Math Inspection Modal */}
       <Modal
         open={Boolean(activeMathItem)}
         onClose={() => setActiveMathItem(null)}
-        title={
-          activeMathItem
-            ? `Replenishment Math: ${activeMathItem.title}`
-            : "Deterministic Math Breakdown"
-        }
-        primaryAction={{
-          content: "Done",
-          onAction: () => setActiveMathItem(null),
-        }}
-        secondaryActions={
-          activeMath && activeMath.recommendedUnits > 0
-            ? [
-                {
-                  content: "Add to Next Purchase Order",
-                  icon: PlusIcon,
-                  onAction: () => {
-                    shopify.toast.show(
-                      `Added ${activeMath?.recommendedUnits} units of ${activeMathItem?.sku} to draft PO.`,
-                    );
-                    setActiveMathItem(null);
-                  },
-                },
-              ]
-            : []
-        }
+        title={`Replenishment Formula: ${activeMathItem?.title}`}
+        secondaryActions={[
+          {
+            content: "Close",
+            onAction: () => setActiveMathItem(null),
+          },
+        ]}
       >
         <Modal.Section>
-          {activeMathItem && activeMath && (
+          {activeMath && activeMathItem && (
             <BlockStack gap="400">
-              {/* Product and Supplier Summary Header */}
-              <Banner
-                tone={
-                  activeMath.recommendedUnits > 0
-                    ? "warning"
-                    : activeMath.isOverstocked
-                    ? "warning"
-                    : "success"
-                }
-                icon={
-                  activeMath.recommendedUnits > 0
-                    ? AlertCircleIcon
-                    : activeMath.isOverstocked
-                    ? InfoIcon
-                    : CheckIcon
-                }
+              <InlineStack align="space-between" blockAlign="center">
+                <Text as="span" variant="bodyMd" fontWeight="bold">
+                  SKU: {activeMathItem.sku}
+                </Text>
+                <Badge tone={activeMath.statusTone}>{activeMath.statusLabel}</Badge>
+              </InlineStack>
+
+              <Divider />
+
+              <div
+                style={{
+                  backgroundColor: "#f9fafb",
+                  borderRadius: "8px",
+                  padding: "16px",
+                  border: "1px solid #e1e3e5",
+                  fontSize: "13px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "10px",
+                }}
               >
-                <InlineStack align="space-between" blockAlign="center">
-                  <BlockStack gap="050">
-                    <Text as="p" variant="headingSm">
-                      {activeMathItem.variantTitle} — SKU: {activeMathItem.sku}
-                    </Text>
-                    <Text as="p" variant="bodySm">
-                      Supplier: <strong>{activeMathItem.supplierName}</strong> • Unit Cost: ${activeMathItem.unitCost.toFixed(2)}
-                    </Text>
-                  </BlockStack>
-                  <BlockStack inlineAlign="end">
-                    <Text
-                      as="p"
-                      variant="headingLg"
-                      tone={
-                        activeMath.recommendedUnits > 0
-                          ? "critical"
-                          : activeMath.isOverstocked
-                          ? "caution"
-                          : "success"
-                      }
-                    >
-                      {activeMath.recommendedUnits} units
-                    </Text>
-                    <Text as="p" variant="bodyXs" tone="subdued">
-                      {activeMath.recommendedUnits > 0
-                        ? `${activeMath.casesCount} case packs (${activeMathItem.packSize} per case)`
-                        : activeMath.isOverstocked
-                        ? `Overstocked (${activeMath.daysOfCoverageOnHand}d runway)`
-                        : "Stock levels healthy"}
-                    </Text>
-                  </BlockStack>
-                </InlineStack>
-              </Banner>
-
-              {/* Overstocked Alert Card if Runway exceeds 90 days */}
-              {activeMath.isOverstocked && (
-                <Card background="bg-surface-warning">
-                  <BlockStack gap="150">
-                    <InlineStack gap="150" blockAlign="center">
-                      <Badge tone="warning">Locked Capital Alert</Badge>
-                      <Text as="span" variant="bodyMd" fontWeight="semibold">
-                        Excess Inventory Warning
-                      </Text>
-                    </InlineStack>
-                    <Text as="p" variant="bodySm">
-                      You currently hold <strong>{activeMathItem.stockOnHand} units</strong> on hand (~{activeMath.daysOfCoverageOnHand} days of runway).
-                      This exceeds your 90-day healthy buffer threshold by over {activeMath.daysOfCoverageOnHand - 90} days,
-                      trapping approximately <strong>${(activeMathItem.stockOnHand * activeMathItem.unitCost).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> in dead cash.
-                    </Text>
-                  </BlockStack>
-                </Card>
-              )}
-
-              {/* Step 1: Deterministic Reorder Point Formula */}
-              <Card>
-                <BlockStack gap="200">
-                  <InlineStack align="space-between">
-                    <Text as="h3" variant="headingSm">
-                      Step 1: Reorder Point (ROP) Formula
-                    </Text>
-                    <Badge tone="info">Industry Standard</Badge>
-                  </InlineStack>
-
-                  <Box
-                    padding="200"
-                    background="bg-surface-secondary"
-                    borderRadius="200"
-                  >
-                    <Text as="p" variant="bodyMd" fontWeight="semibold">
-                      ROP = (Daily Sales × Lead Time) + Safety Stock Buffer
-                    </Text>
-                  </Box>
-
-                  <BlockStack gap="100">
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Average Daily Sales ({windowDaysNum}-day velocity):
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        {activeMath.ads.toFixed(2)} units/day ({activeMathItem.unitsSold30d} sold ÷ {windowDaysNum}d)
-                      </Text>
-                    </InlineStack>
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Supplier Transit & Lead Time:
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        {activeMathItem.leadTimeDays} days
-                      </Text>
-                    </InlineStack>
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Base Lead-Time Demand (Sales × Lead Time):
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        {activeMath.ads.toFixed(1)} × {activeMathItem.leadTimeDays}d = {activeMath.leadTimeDemand} units
-                      </Text>
-                    </InlineStack>
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Safety Stock Buffer ({activeMathItem.safetyStockDays} days):
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        +{activeMath.safetyStock} units (min floor: {activeMathItem.safetyStockMinimum})
-                      </Text>
-                    </InlineStack>
-
-                    <Divider />
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodyMd" fontWeight="bold">
-                        Calculated Target Reorder Point (ROP):
-                      </Text>
-                      <Text as="span" variant="bodyMd" fontWeight="bold">
-                        {activeMath.reorderPoint} units
-                      </Text>
-                    </InlineStack>
-                  </BlockStack>
-                </BlockStack>
-              </Card>
-
-              {/* Step 2: Net Deficit & Double-Ordering Prevention */}
-              <Card>
-                <BlockStack gap="200">
-                  <InlineStack align="space-between">
-                    <Text as="h3" variant="headingSm">
-                      Step 2: Prevent Double-Ordering (Incoming PO Deduction)
-                    </Text>
-                    {activeMath.stockOnOrder > 0 && (
-                      <Badge tone="success">Double-Order Protected</Badge>
-                    )}
-                  </InlineStack>
-
-                  <Box
-                    padding="200"
-                    background="bg-surface-secondary"
-                    borderRadius="200"
-                  >
-                    <Text as="p" variant="bodyMd" fontWeight="semibold">
-                      Raw Shortage = Reorder Point ({activeMath.reorderPoint}) - Available Stock ({activeMath.stockOnHand}) - Incoming on POs ({activeMath.stockOnOrder})
-                    </Text>
-                  </Box>
-
-                  <BlockStack gap="100">
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Physical Stock On Hand:
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        {activeMath.stockOnHand} units ({activeMath.daysOfCoverageOnHand} days runway)
-                      </Text>
-                    </InlineStack>
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Incoming Stock on Open POs (Already on boat/truck):
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="bold" tone={activeMath.stockOnOrder > 0 ? "success" : "base"}>
-                        -{activeMath.stockOnOrder} units {activeMath.stockOnOrder > 0 ? "(Deducted to save cash)" : ""}
-                      </Text>
-                    </InlineStack>
-
-                    {activeMath.stockOnOrder > 0 && (
-                      <Banner tone="info">
-                        <Text as="p" variant="bodyXs">
-                          <strong>Double-Ordering Prevented:</strong> {activeMath.stockOnOrder} units are already in transit from supplier.
-                          We deducted these units directly so you don't accidentally tie up extra capital.
-                        </Text>
-                      </Banner>
-                    )}
-
-                    <Divider />
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodyMd" fontWeight="bold">
-                        Net Shortage:
-                      </Text>
-                      <Text
-                        as="span"
-                        variant="bodyMd"
-                        fontWeight="bold"
-                        tone={
-                          activeMath.rawDeficit > 0
-                            ? "critical"
-                            : activeMath.isOverstocked
-                            ? "caution"
-                            : "success"
-                        }
-                      >
-                        {activeMath.rawDeficit > 0
-                          ? `${activeMath.rawDeficit} units shortage`
-                          : `0 units (${activeMath.isOverstocked ? "Surplus: " + (activeMath.effectiveStock - activeMath.reorderPoint) + " units" : "No shortage"})`}
-                      </Text>
-                    </InlineStack>
-                  </BlockStack>
-                </BlockStack>
-              </Card>
-
-              {/* Step 3: Supplier Constraints & Case Pack Auto-Rounding */}
-              <Card>
-                <BlockStack gap="200">
-                  <InlineStack align="space-between">
-                    <Text as="h3" variant="headingSm">
-                      Step 3: Supplier MOQs & Case Pack Auto-Rounding
-                    </Text>
-                    <Badge tone="attention">Factory Compliant</Badge>
-                  </InlineStack>
-
-                  <Box
-                    padding="200"
-                    background="bg-surface-secondary"
-                    borderRadius="200"
-                  >
-                    <Text as="p" variant="bodyMd" fontWeight="semibold">
-                      Raw Shortage: {activeMath.rawDeficit} units. Supplier MOQ: {activeMathItem.minOrderQty}. Pack Size: {activeMathItem.packSize}. Auto-rounded to nearest pack size: {activeMath.recommendedUnits} units ({activeMath.casesCount} cases).
-                    </Text>
-                  </Box>
-
-                  <BlockStack gap="100">
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Supplier Minimum Order Quantity (MOQ):
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        {activeMathItem.minOrderQty} units
-                      </Text>
-                    </InlineStack>
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Supplier Pack Size (Master Carton multiple):
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        {activeMathItem.packSize} units/case
-                      </Text>
-                    </InlineStack>
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Rounding Logic:
-                      </Text>
-                      <Text as="span" variant="bodySm" fontWeight="medium">
-                        {activeMath.recommendedUnits > 0
-                          ? `${Math.max(activeMath.rawDeficit, activeMathItem.minOrderQty)} units rounded up to the next multiple of ${activeMathItem.packSize}`
-                          : "No rounding needed (0 units required)"}
-                      </Text>
-                    </InlineStack>
-
-                    <Divider />
-
-                    <InlineStack align="space-between">
-                      <Text as="span" variant="bodyLg" fontWeight="bold">
-                        Final Recommended Purchase Order:
-                      </Text>
-                      <BlockStack inlineAlign="end">
-                        <Text
-                          as="span"
-                          variant="bodyLg"
-                          fontWeight="bold"
-                          tone={activeMath.recommendedUnits > 0 ? "critical" : "success"}
-                        >
-                          {activeMath.recommendedUnits > 0
-                            ? `${activeMath.recommendedUnits} units (${activeMath.casesCount} cases)`
-                            : "0 units (No order required)"}
-                        </Text>
-                        <Text as="span" variant="bodyXs" tone="subdued">
-                          {activeMath.recommendedUnits > 0
-                            ? `Total Line Cost: $${activeMath.estimatedCost.toFixed(2)}`
-                            : "Zero reorder capital required"}
-                        </Text>
-                      </BlockStack>
-                    </InlineStack>
-                  </BlockStack>
-                </BlockStack>
-              </Card>
+                <div>
+                  <strong>1. Average Daily Sales (ADS):</strong>{" "}
+                  <code>{activeMath.ads} units/day</code> ({rollingWindow}-day rolling window)
+                </div>
+                <div>
+                  <strong>2. Lead Time Demand:</strong>{" "}
+                  <code>{activeMath.ads} × {activeMathItem.leadTimeDays}d = {activeMath.leadTimeDemand} units</code>
+                </div>
+                <div>
+                  <strong>3. Safety Stock Buffer:</strong>{" "}
+                  <code>{activeMath.safetyStock} units</code> ({activeMathItem.safetyStockDays}d coverage)
+                </div>
+                <div>
+                  <strong>4. Reorder Point (ROP Floor):</strong>{" "}
+                  <code>{activeMath.leadTimeDemand} + {activeMath.safetyStock} = {activeMath.reorderPoint} units</code>
+                </div>
+                <div>
+                  <strong>5. Cycle Stock (Order Cycle):</strong>{" "}
+                  <code>{activeMath.ads} × {activeMath.reorderFrequencyDays}d = {activeMath.cycleStock} units</code>
+                </div>
+                <div>
+                  <strong>6. Target Stock Level (Ceiling):</strong>{" "}
+                  <code>ROP ({activeMath.reorderPoint}) + Cycle Stock ({activeMath.cycleStock}) = {activeMath.targetStockLevel} units</code>
+                </div>
+                <div>
+                  <strong>7. Current Stock Position:</strong>{" "}
+                  <code>OnHand ({activeMath.stockOnHand}) + Inbound ({activeMath.stockOnOrder}) = {activeMath.effectiveStock} units</code>
+                </div>
+                <div>
+                  <strong>8. Purchase Quantity (Deficit):</strong>{" "}
+                  <code>{activeMath.isBelowReorderPoint ? `Target (${activeMath.targetStockLevel}) - Effective (${activeMath.effectiveStock}) = ${activeMath.rawDeficit} units` : "0 units (Stock above ROP floor)"}</code>
+                </div>
+                <div>
+                  <strong>9. Case Pack & MOQ Rounding:</strong>{" "}
+                  <code>MOQ: {activeMathItem.minOrderQty}, Pack Size: {activeMathItem.packSize} → {activeMath.recommendedUnits} units ({activeMath.casesCount} cases)</code>
+                </div>
+                <div>
+                  <strong>10. Overstock Ceiling (+15%):</strong>{" "}
+                  <code>Target ({activeMath.targetStockLevel}) × 1.15 = {activeMath.overstockThreshold} units (Current OnHand: {activeMath.stockOnHand})</code>
+                </div>
+              </div>
             </BlockStack>
           )}
         </Modal.Section>
       </Modal>
+
+      {/* 3. Setup Guide & Technical Playbook Modal */}
+      <ClearStockGuideModal
+        isOpen={showGuideModal}
+        onClose={() => setShowGuideModal(false)}
+        defaultTab={guideDefaultTab}
+      />
+
+      {/* 4. Support & Help Desk Modal */}
+      <SupportModal
+        isOpen={showSupportModal}
+        onClose={() => setShowSupportModal(false)}
+        shop={shop}
+      />
+
+      {/* 5. Sticky Floating PO Creation Bar (Eliminates scrolling to top after selecting products) */}
+      {viewMode === "dashboard" && selectedResources.length > 0 && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: "28px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 999,
+            backgroundColor: "#202223",
+            color: "#ffffff",
+            padding: "10px 20px",
+            borderRadius: "30px",
+            boxShadow:
+              "0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3)",
+            display: "flex",
+            alignItems: "center",
+            gap: "16px",
+            border: "1px solid rgba(255, 255, 255, 0.15)",
+            backdropFilter: "blur(12px)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ fontSize: "16px" }}>📦</span>
+            <span style={{ fontSize: "13px", fontWeight: "600", color: "#ffffff" }}>
+              {selectedResources.length} {selectedResources.length === 1 ? "item" : "items"} selected
+            </span>
+          </div>
+
+          <div
+            style={{
+              width: "1px",
+              height: "20px",
+              backgroundColor: "rgba(255, 255, 255, 0.2)",
+            }}
+          />
+
+          <button
+            type="button"
+            onClick={handleCreatePOFromSelected}
+            style={{
+              backgroundColor: "#008060",
+              color: "#ffffff",
+              border: "none",
+              borderRadius: "20px",
+              padding: "7px 18px",
+              fontSize: "13px",
+              fontWeight: "600",
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+            }}
+          >
+            <span>Create Purchase Order</span>
+            <span style={{ fontSize: "14px" }}>→</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={clearSelection}
+            style={{
+              backgroundColor: "transparent",
+              color: "#b4b7ba",
+              border: "none",
+              fontSize: "12px",
+              fontWeight: "500",
+              cursor: "pointer",
+              padding: "4px 8px",
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      )}
     </Page>
   );
 }

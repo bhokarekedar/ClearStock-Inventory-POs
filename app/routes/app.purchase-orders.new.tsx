@@ -121,13 +121,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const leadTimeDemand = ads * leadTime;
     const safetyStock = Math.max(Math.round(ads * r.safetyStockDays), r.safetyStockMinimum);
     const reorderPoint = Math.round(leadTimeDemand + safetyStock);
+    // Cycle stock & target stock level
+    const cycleStock = Math.round(ads * 30);
+    const targetStockLevel = Math.round(reorderPoint + cycleStock);
 
     const stockOnOrder = openPoItems
       .filter((p) => p.variantId === r.variantId)
       .reduce((sum: number, p) => sum + (p.quantityOrdered - p.quantityReceived), 0);
     const stockOnHand = r.availableStock || 0;
+    const effectiveStock = stockOnHand + stockOnOrder;
 
-    const rawDeficit = Math.max(0, reorderPoint - stockOnHand - stockOnOrder);
+    // When below reorder point floor, order up to Target Stock Level
+    const rawDeficit = effectiveStock <= reorderPoint
+      ? Math.max(0, targetStockLevel - effectiveStock)
+      : 0;
+
     if (rawDeficit > 0) {
       const minUnitsNeeded = Math.max(rawDeficit, r.minOrderQty);
       const casesCount = Math.ceil(minUnitsNeeded / r.packSize);

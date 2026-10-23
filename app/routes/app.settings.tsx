@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useRouteError, useLoaderData, useSubmit, useNavigation, useActionData } from "react-router";
+import { useRouteError, useLoaderData, useSubmit, useNavigation, useActionData, useNavigate } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import {
   Page,
@@ -10,27 +10,32 @@ import {
   TextField,
   Select,
   Button,
+  ButtonGroup,
   BlockStack,
   InlineStack,
   Banner,
   Checkbox,
   Divider,
+  Badge,
+  Modal,
 } from "@shopify/polaris";
-import { RefreshIcon, CheckIcon } from "@shopify/polaris-icons";
+import { RefreshIcon, CheckIcon, DeleteIcon, ExportIcon } from "@shopify/polaris-icons";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { SupportModal } from "../components/SupportModal";
+import { ClearStockGuideModal } from "../components/ClearStockGuideModal";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  let settings = await (prisma as any).appSettings.findFirst({
+  let settings = await prisma.appSettings.findFirst({
     where: { shop },
   });
 
   if (!settings) {
-    settings = await (prisma as any).appSettings.create({
+    settings = await prisma.appSettings.create({
       data: {
         shop,
         defaultLookbackWindow: 30,
@@ -38,6 +43,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         defaultLeadTimeDays: 14,
         autoRoundCasePacks: true,
         emailAlerts: false,
+        selectedPlan: "growth",
       },
     });
   }
@@ -50,29 +56,245 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     where: { shop },
   });
 
+  const suppliersCount = await prisma.supplier.count({
+    where: { shop },
+  });
+
+  const poCount = await prisma.purchaseOrder.count({
+    where: { shop },
+  });
+
   return {
     shop,
     settings,
     stats: {
       trackedSkus: rulesCount,
       salesLedgerRows: salesCount,
+      suppliersCount,
+      poCount,
     },
   };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
-
   const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  // 1. RELAUNCH ONBOARDING WIZARD
+  if (intent === "RELAUNCH_WIZARD") {
+    await prisma.appSettings.upsert({
+      where: { shop },
+      update: { onboardingCompleted: false },
+      create: { shop, onboardingCompleted: false },
+    });
+    return { ok: true, relaunchWizard: true, message: "Onboarding Wizard reset. Redirecting..." };
+  }
+
+  // 2. FULL HISTORICAL RE-SYNC
+  if (intent === "FULL_RESYNC") {
+    try {
+      // 1. Sync Products (No Protected Customer Data required)
+      const productsResponse = await admin.graphql(`
+        query SyncStoreProductsOnly {
+          products(first: 50) {
+            edges {
+              node {
+                id
+                title
+                vendor
+                variants(first: 50) {
+                  edges {
+                    node {
+                      id
+                      title
+                      sku
+                      price
+                      inventoryQuantity
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `);
+
+      const productsJson = await productsResponse.json();
+      const productEdges = productsJson.data?.products?.edges || [];
+
+      // 2. Sync Orders in isolated try-catch
+      let orderEdges: any[] = [];
+      try {
+        const ordersResponse = await admin.graphql(`
+          query SyncStoreOrdersOnly {
+            orders(first: 50, query: "status:open OR status:closed") {
+              edges {
+                node {
+                  id
+                  createdAt
+                  displayFinancialStatus
+                  cancelledAt
+                  lineItems(first: 50) {
+                    edges {
+                      node {
+                        quantity
+                        variant {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `);
+        const ordersJson: any = await ordersResponse.json();
+        if (!ordersJson.errors || ordersJson.errors.length === 0) {
+          orderEdges = ordersJson.data?.orders?.edges || [];
+        }
+      } catch (orderErr: any) {
+        console.warn("[Settings Orders Sync PCD Handled]", orderErr.message);
+      }
+
+      // Update inventory levels
+      for (const pEdge of productEdges) {
+        for (const vEdge of pEdge.node.variants?.edges || []) {
+          const v = vEdge.node;
+          if (typeof v.inventoryQuantity === "number") {
+            await prisma.variantSupplierRule.updateMany({
+              where: { shop, variantId: v.id },
+              data: { availableStock: v.inventoryQuantity },
+            });
+          }
+        }
+      }
+
+      // Ingest orders
+      for (const oEdge of orderEdges) {
+        const o = oEdge.node;
+        if (o.cancelledAt) continue;
+        const date = new Date(o.createdAt);
+        date.setUTCHours(0, 0, 0, 0);
+
+        for (const itemEdge of o.lineItems?.edges || []) {
+          const item = itemEdge.node;
+          if (!item.variant?.id) continue;
+          const qty = parseInt(String(item.quantity || 0), 10);
+          if (qty <= 0) continue;
+
+          await prisma.dailySalesAggregator.upsert({
+            where: {
+              shop_variantId_date: {
+                shop,
+                variantId: item.variant.id,
+                date,
+              },
+            },
+            update: { unitsSold: { increment: qty } },
+            create: { shop, variantId: item.variant.id, date, unitsSold: qty },
+          });
+        }
+      }
+
+      return {
+        ok: true,
+        message: `Successfully synchronized ${productEdges.length} products and ${orderEdges.length} orders from Shopify.`,
+      };
+    } catch (err: any) {
+      console.error("[Settings Full Resync Error]", err);
+      return { ok: false, error: "Failed to perform historical sync." };
+    }
+  }
+
+  // 3. GDPR / CCPA DATA PORTABILITY EXPORT
+  if (intent === "EXPORT_DATA") {
+    try {
+      const [appSettings, suppliers, rules, purchaseOrders, salesRecords] = await Promise.all([
+        prisma.appSettings.findFirst({ where: { shop } }),
+        prisma.supplier.findMany({ where: { shop } }),
+        prisma.variantSupplierRule.findMany({ where: { shop } }),
+        prisma.purchaseOrder.findMany({ where: { shop }, include: { items: true } }),
+        prisma.dailySalesAggregator.findMany({ where: { shop } }),
+      ]);
+
+      const exportPayload = {
+        complianceMetadata: {
+          regulatoryStandard: "GDPR (General Data Protection Regulation) & CCPA (California Consumer Privacy Act)",
+          dataPortabilityRight: "GDPR Article 20 / CCPA Section 1798.100 (Right to Know & Portability)",
+          storeDomain: shop,
+          exportedAt: new Date().toISOString(),
+          customerPIIStatement: "ClearStock does NOT collect, retain, process, or sell customer Personally Identifiable Information (PII). Sales velocity metrics are stored anonymously by product variant ID and UTC calendar date.",
+        },
+        storeInformation: {
+          shop,
+          settings: appSettings,
+        },
+        suppliers,
+        variantSupplierRules: rules,
+        purchaseOrders,
+        salesVelocityCache: salesRecords,
+        statistics: {
+          totalSuppliers: suppliers.length,
+          totalSourcingRules: rules.length,
+          totalPurchaseOrders: purchaseOrders.length,
+          totalDailySalesRows: salesRecords.length,
+        },
+      };
+
+      return {
+        ok: true,
+        exportData: exportPayload,
+        message: "Data export compiled successfully. Starting download...",
+      };
+    } catch (err: any) {
+      console.error("[Export Data Error]", err);
+      return { ok: false, error: "Failed to compile compliance data export." };
+    }
+  }
+
+  // 4. DANGER ZONE: WIPE ALL LOCAL DATABASE DATA
+  if (intent === "WIPE_ALL_DATA") {
+    const confirmation = String(formData.get("confirmation") || "").trim();
+    if (confirmation !== "WIPE") {
+      return { ok: false, error: 'Please type "WIPE" in all capitals to confirm permanent data deletion.' };
+    }
+
+    try {
+      await prisma.purchaseOrderItem.deleteMany({
+        where: { purchaseOrder: { shop } },
+      });
+      await prisma.purchaseOrder.deleteMany({ where: { shop } });
+      await prisma.variantSupplierRule.deleteMany({ where: { shop } });
+      await prisma.supplier.deleteMany({ where: { shop } });
+      await prisma.dailySalesAggregator.deleteMany({ where: { shop } });
+      await prisma.processedWebhook.deleteMany({ where: { shop } });
+      await prisma.historicalSyncJob.deleteMany({ where: { shop } });
+      await prisma.appSettings.deleteMany({ where: { shop } });
+
+      // Note: Session is deliberately preserved so merchant remains logged in
+      console.log(`[Data Wipe] Successfully wiped all records for shop ${shop}`);
+
+      return {
+        ok: true,
+        dataWiped: true,
+        message: "All local ClearStock data wiped successfully. Redirecting to fresh setup...",
+      };
+    } catch (err: any) {
+      console.error("[Data Wipe Error]", err);
+      return { ok: false, error: "Failed to wipe data: " + err.message };
+    }
+  }
+
+  // 5. REGULAR SETTINGS SAVE
   const defaultLookbackWindow = parseInt(String(formData.get("defaultLookbackWindow") || "30"), 10);
   const defaultSafetyStockDays = parseInt(String(formData.get("defaultSafetyStockDays") || "7"), 10);
   const defaultLeadTimeDays = parseInt(String(formData.get("defaultLeadTimeDays") || "14"), 10);
   const autoRoundCasePacks = formData.get("autoRoundCasePacks") === "true";
-  const emailAlerts = formData.get("emailAlerts") === "true";
-  const alertEmail = String(formData.get("alertEmail") || "");
 
-  const settings = await (prisma as any).appSettings.upsert({
+  const settings = await prisma.appSettings.upsert({
     where: { shop },
     update: {
       defaultLookbackWindow,
@@ -94,12 +316,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 export default function SettingsPage() {
   const shopify = useAppBridge();
+  const navigate = useNavigate();
   const submit = useSubmit();
   const navigation = useNavigation();
   const loaderData = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
 
-  const isSaving = navigation.state === "submitting";
+  const isSubmitting = navigation.state === "submitting";
 
   const { settings, stats } = loaderData;
 
@@ -108,11 +331,44 @@ export default function SettingsPage() {
   const [defaultLeadTime, setDefaultLeadTime] = useState<string>(String(settings.defaultLeadTimeDays));
   const [autoRound, setAutoRound] = useState<boolean>(settings.autoRoundCasePacks);
 
+  // Modals state
+  const [showSupportModal, setShowSupportModal] = useState(false);
+  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [showWipeModal, setShowWipeModal] = useState(false);
+  const [wipeConfirmText, setWipeConfirmText] = useState("");
+
+  // Handle Action Responses
   useEffect(() => {
-    if (actionData?.ok && actionData.message) {
-      shopify.toast.show(actionData.message);
+    if (actionData?.ok) {
+      if (actionData.message) {
+        shopify.toast.show(actionData.message);
+      }
+      if (actionData.relaunchWizard || actionData.dataWiped) {
+        navigate("/app");
+      }
+      // Handle browser download for export data
+      if (actionData.exportData) {
+        try {
+          const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(
+            JSON.stringify(actionData.exportData, null, 2),
+          )}`;
+          const downloadAnchor = document.createElement("a");
+          downloadAnchor.setAttribute("href", jsonString);
+          downloadAnchor.setAttribute(
+            "download",
+            `clearstock-data-export-${loaderData.shop.replace(".myshopify.com", "")}-${new Date().toISOString().slice(0, 10)}.json`,
+          );
+          document.body.appendChild(downloadAnchor);
+          downloadAnchor.click();
+          downloadAnchor.remove();
+        } catch (e) {
+          console.error("Export download error:", e);
+        }
+      }
+    } else if (actionData?.error) {
+      shopify.toast.show(actionData.error, { isError: true });
     }
-  }, [actionData, shopify]);
+  }, [actionData, shopify, navigate, loaderData.shop]);
 
   const handleSave = () => {
     submit(
@@ -127,22 +383,70 @@ export default function SettingsPage() {
   };
 
   const handleFullResync = () => {
-    shopify.toast.show("Triggered 90-day ledger reconciliation.");
+    submit({ intent: "FULL_RESYNC" }, { method: "post" });
+  };
+
+  const handleExportData = () => {
+    submit({ intent: "EXPORT_DATA" }, { method: "post" });
+  };
+
+  const handleWipeData = () => {
+    submit(
+      {
+        intent: "WIPE_ALL_DATA",
+        confirmation: wipeConfirmText,
+      },
+      { method: "post" },
+    );
   };
 
   return (
     <Page
       title="Settings"
-      subtitle="Configure global forecasting formulas, case-pack rules, and background ledger sync."
+      subtitle="Configure global forecasting formulas, case-pack rules, data privacy, and danger zone."
       primaryAction={{
         content: "Save Settings",
         icon: CheckIcon,
-        loading: isSaving,
+        loading: isSubmitting && navigation.formData?.get("intent") === undefined,
         onAction: handleSave,
       }}
     >
-      <BlockStack gap="400">
+      <BlockStack gap="500">
         <Layout>
+          {/* Section 1: Active Subscription Plan */}
+          <Layout.AnnotatedSection
+            id="subscription-plan"
+            title="Subscription & Plan"
+            description="View your current plan tier and relaunch the setup wizard if you need to reconfigure."
+          >
+            <Card>
+              <BlockStack gap="300">
+                <InlineStack align="space-between" blockAlign="center" wrap>
+                  <BlockStack gap="050">
+                    <InlineStack gap="200" blockAlign="center">
+                      <Text as="span" variant="headingMd">
+                        {settings.selectedPlan === "starter"
+                          ? "Starter Plan ($0/mo)"
+                          : settings.selectedPlan === "scale"
+                          ? "Scale Enterprise ($49/mo)"
+                          : "Growth Plan ($19/mo)"}
+                      </Text>
+                      <Badge tone="success">Active (14-Day Trial)</Badge>
+                    </InlineStack>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Unlimited SKUs, multi-supplier lead times, and automated Purchase Orders.
+                    </Text>
+                  </BlockStack>
+
+                  <Button onClick={() => setShowSupportModal(true)}>
+                    💬 Contact Support
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </Layout.AnnotatedSection>
+
+          {/* Section 2: Forecasting Formula Defaults */}
           <Layout.AnnotatedSection
             id="formula-defaults"
             title="Forecasting Formula Defaults"
@@ -151,19 +455,19 @@ export default function SettingsPage() {
             <Card>
               <BlockStack gap="400">
                 <Select
-                  label="Default Sales Velocity Window"
+                  label="Default Sales Lookback Window"
                   options={[
-                    { label: "7 Days (Recent momentum)", value: "7" },
-                    { label: "14 Days (Balanced short-term)", value: "14" },
-                    { label: "30 Days (Recommended default)", value: "30" },
-                    { label: "90 Days (Long-term smoothing)", value: "90" },
+                    { label: "7 Days (Fast-moving flash sales / peak holiday)", value: "7" },
+                    { label: "14 Days (Bi-weekly trend capture)", value: "14" },
+                    { label: "30 Days (Recommended for balanced demand smoothing)", value: "30" },
+                    { label: "90 Days (Quarterly staple replenishment)", value: "90" },
                   ]}
                   value={defaultWindow}
                   onChange={setDefaultWindow}
-                  helpText="Default rolling window applied to Replenishment calculations across your catalog."
+                  helpText="Select the historical window used across the app to calculate daily run-rates."
                 />
 
-                <InlineStack gap="300">
+                <InlineStack gap="400">
                   <div style={{ flex: 1 }}>
                     <TextField
                       label="Default Safety Stock (Days)"
@@ -171,7 +475,7 @@ export default function SettingsPage() {
                       value={defaultSafetyDays}
                       onChange={setDefaultSafetyDays}
                       autoComplete="off"
-                      helpText="Days of buffer stock to maintain above vendor lead time."
+                      helpText="Buffer days to cover unexpected sales spikes or shipping delays."
                     />
                   </div>
                   <div style={{ flex: 1 }}>
@@ -198,38 +502,196 @@ export default function SettingsPage() {
             </Card>
           </Layout.AnnotatedSection>
 
+          {/* Section 3: Data Sync & Truth */}
           <Layout.AnnotatedSection
             id="data-sync"
             title="Shopify Data Sync & Health"
-            description="Manage PostgreSQL ledger synchronization and manually verify local sales records."
+            description="Manage PostgreSQL ledger synchronization and manually verify local sales records against Shopify."
           >
             <Card>
               <BlockStack gap="300">
                 <Banner tone="success">
                   <Text as="p" variant="bodyMd">
-                    PostgreSQL caching engine active. Replenishment calculations execute locally in sub-second time.
+                    PostgreSQL caching engine active. Replenishment calculations execute locally with sub-second latency.
                   </Text>
                 </Banner>
 
                 <BlockStack gap="100">
                   <Text as="p" variant="bodySm">
-                    <strong>Local Ledger:</strong> {stats.trackedSkus} tracked SKUs • {stats.salesLedgerRows.toLocaleString()} daily sales records.
+                    <strong>Local Ledger:</strong> {stats.trackedSkus} tracked SKUs • {stats.suppliersCount} suppliers • {stats.poCount} purchase orders • {stats.salesLedgerRows.toLocaleString()} daily sales records.
                   </Text>
                   <Text as="p" variant="bodySm" tone="subdued">
                     Store domain: {loaderData.shop}
                   </Text>
                 </BlockStack>
 
-                <div>
-                  <Button icon={RefreshIcon} onClick={handleFullResync}>
+                <InlineStack gap="200" blockAlign="center" wrap>
+                  <Button
+                    icon={RefreshIcon}
+                    loading={isSubmitting && navigation.formData?.get("intent") === "FULL_RESYNC"}
+                    onClick={handleFullResync}
+                  >
                     Trigger 90-Day Historical Re-Sync
                   </Button>
+                  <Button onClick={() => setShowGuideModal(true)}>
+                    📖 View Sync & Math Guide
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </Layout.AnnotatedSection>
+
+          {/* Section 4: Data Portability & Compliance (GDPR Article 15 / CCPA) */}
+          <Layout.AnnotatedSection
+            id="data-compliance"
+            title="Data Portability & Compliance (GDPR / CCPA)"
+            description="Download an export of all data stored for your store. ClearStock complies with global privacy regulations and does not retain customer PII."
+          >
+            <Card>
+              <BlockStack gap="400">
+                <div
+                  style={{
+                    backgroundColor: "#f0fdf4",
+                    border: "1px solid #bbf7d0",
+                    borderRadius: "10px",
+                    padding: "16px",
+                  }}
+                >
+                  <Text as="h3" variant="headingSm" tone="success">
+                    🛡️ Merchant Privacy & Compliance Guarantee
+                  </Text>
+                  <div style={{ marginTop: "6px", fontSize: "13px", color: "#166534", lineHeight: "1.5" }}>
+                    • <strong>Zero Customer PII:</strong> ClearStock never stores customer names, emails, addresses, or payment data.<br />
+                    • <strong>Anonymous Aggregation:</strong> Sales volume is strictly aggregated by Product Variant ID and UTC date.<br />
+                    • <strong>Full Data Portability:</strong> You can download a complete JSON archive of your rules, purchase orders, and supplier directory at any time.
+                  </div>
                 </div>
+
+                <InlineStack align="space-between" blockAlign="center" wrap>
+                  <BlockStack gap="050">
+                    <Text as="span" variant="bodyMd" fontWeight="bold">
+                      Export Store Data Archive (.JSON)
+                    </Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Includes all suppliers, replenishment rules, purchase orders, and sales cache.
+                    </Text>
+                  </BlockStack>
+
+                  <Button
+                    icon={ExportIcon}
+                    loading={isSubmitting && navigation.formData?.get("intent") === "EXPORT_DATA"}
+                    onClick={handleExportData}
+                  >
+                    Download Data Archive
+                  </Button>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </Layout.AnnotatedSection>
+
+          {/* Section 5: Danger Zone: Wipe Store Data */}
+          <Layout.AnnotatedSection
+            id="danger-zone"
+            title="Danger Zone: Wipe Data"
+            description="Permanently delete all local database records for this store. Your live Shopify products, orders, and inventory will remain completely safe and untouched."
+          >
+            <Card>
+              <BlockStack gap="400">
+                <Banner tone="critical" title="Permanent Data Deletion">
+                  <p>
+                    Wiping your data permanently removes all configured suppliers, custom replenishment thresholds, purchase orders, and sales velocity logs from ClearStock's database.
+                  </p>
+                </Banner>
+
+                <InlineStack align="space-between" blockAlign="center" wrap>
+                  <BlockStack gap="050">
+                    <Text as="span" variant="bodyMd" fontWeight="bold">
+                      Wipe All ClearStock Data
+                    </Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Returns the app to a clean state and opens the setup wizard.
+                    </Text>
+                  </BlockStack>
+
+                  <Button
+                    tone="critical"
+                    variant="primary"
+                    icon={DeleteIcon}
+                    onClick={() => {
+                      setWipeConfirmText("");
+                      setShowWipeModal(true);
+                    }}
+                  >
+                    Wipe All App Data
+                  </Button>
+                </InlineStack>
               </BlockStack>
             </Card>
           </Layout.AnnotatedSection>
         </Layout>
       </BlockStack>
+
+      {/* Wipe Confirmation Modal */}
+      <Modal
+        open={showWipeModal}
+        onClose={() => setShowWipeModal(false)}
+        title="⚠️ Confirm Permanent Data Wipe"
+        primaryAction={{
+          content: "Permanently Wipe Data",
+          destructive: true,
+          disabled: wipeConfirmText.trim() !== "WIPE" || isSubmitting,
+          loading: isSubmitting && navigation.formData?.get("intent") === "WIPE_ALL_DATA",
+          onAction: handleWipeData,
+        }}
+        secondaryActions={[
+          {
+            content: "Cancel",
+            onAction: () => setShowWipeModal(false),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="400">
+            <Banner tone="warning">
+              <p>
+                This action is <strong>irreversible</strong>. It will permanently delete:
+              </p>
+              <ul style={{ margin: "6px 0 0 0", paddingLeft: "18px", fontSize: "13px" }}>
+                <li>All {stats.suppliersCount} configured suppliers and contact records</li>
+                <li>All {stats.trackedSkus} variant replenishment rules, MOQ, and lead times</li>
+                <li>All {stats.poCount} purchase orders and line items</li>
+                <li>All {stats.salesLedgerRows.toLocaleString()} sales velocity ledger records</li>
+              </ul>
+            </Banner>
+
+            <Text as="p" variant="bodyMd">
+              Your active Shopify store catalog, orders, and inventory levels in Shopify Admin will <strong>not</strong> be affected.
+            </Text>
+
+            <TextField
+              label='To confirm deletion, please type "WIPE" below:'
+              value={wipeConfirmText}
+              onChange={setWipeConfirmText}
+              placeholder="WIPE"
+              autoComplete="off"
+            />
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
+
+      {/* Support Desk Modal */}
+      <SupportModal
+        isOpen={showSupportModal}
+        onClose={() => setShowSupportModal(false)}
+        shop={loaderData.shop}
+      />
+
+      {/* Guide Playbook Modal */}
+      <ClearStockGuideModal
+        isOpen={showGuideModal}
+        onClose={() => setShowGuideModal(false)}
+        defaultTab="math"
+      />
     </Page>
   );
 }

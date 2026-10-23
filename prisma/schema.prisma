@@ -198,6 +198,8 @@ model AppSettings {
   autoRoundCasePacks     Boolean  @default(true)
   emailAlerts            Boolean  @default(false)
   alertEmail             String?
+  onboardingCompleted    Boolean  @default(false)
+  selectedPlan           String   @default("growth")
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
