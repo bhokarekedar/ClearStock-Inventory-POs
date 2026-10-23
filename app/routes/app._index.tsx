@@ -1412,10 +1412,10 @@ export default function ReplenishmentDashboard() {
                       <Text as="h2" variant="headingLg">
                         Step 1: Connect & Sync Store Catalog
                       </Text>
-                      <Badge tone="info">Shopify is Single Source of Truth</Badge>
+                      <Badge tone="info">Live Store Sync</Badge>
                     </InlineStack>
                     <Text as="p" tone="subdued">
-                      ClearStock directly queries your live Shopify products, real-time inventory, and past 90-day order velocity.
+                      ClearStock connects to your live Shopify products, real-time inventory, and past 90-day sales history.
                     </Text>
                   </BlockStack>
                   <Button
@@ -1430,12 +1430,75 @@ export default function ReplenishmentDashboard() {
 
                 <Divider />
 
+                {/* 🎥 Onboarding Video Walkthrough (Replace src with your YouTube embed URL) */}
+                <div
+                  style={{
+                    backgroundColor: "#ffffff",
+                    border: "1px solid #dfe3e8",
+                    borderRadius: "12px",
+                    overflow: "hidden",
+                    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.05)",
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: "14px 18px",
+                      backgroundColor: "#f9fafb",
+                      borderBottom: "1px solid #e1e3e5",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <span style={{ fontSize: "20px" }}>🎥</span>
+                      <div>
+                        <div style={{ fontSize: "14px", fontWeight: "700", color: "#202223" }}>
+                          Quickstart Tour: How ClearStock Works (2 Minutes)
+                        </div>
+                        <div style={{ fontSize: "12px", color: "#6d7175", marginTop: "1px" }}>
+                          See how automated reorder alerts, supplier purchase orders, and live inventory sync keep your store 100% stocked.
+                        </div>
+                      </div>
+                    </div>
+                    <Badge tone="success">Video Walkthrough</Badge>
+                  </div>
+
+                  <div
+                    style={{
+                      position: "relative",
+                      paddingBottom: "52%",
+                      height: 0,
+                      overflow: "hidden",
+                      backgroundColor: "#000000",
+                    }}
+                  >
+                    {/* 👇 REPLACE THIS URL WITH YOUR CUSTOM YOUTUBE VIDEO LINK 👇 */}
+                    <iframe
+                      src="https://www.youtube.com/embed/dQw4w9WgXcQ"
+                      title="ClearStock App Walkthrough Tour"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      allowFullScreen
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "100%",
+                        height: "100%",
+                        border: 0,
+                      }}
+                    />
+                  </div>
+                </div>
+
                 <div
                   style={{
                     backgroundColor: "#f9fafb",
                     border: "1px solid #e1e3e5",
                     borderRadius: "12px",
-                    padding: "24px",
+                    padding: "20px",
                     display: "grid",
                     gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
                     gap: "16px",
@@ -1446,17 +1509,17 @@ export default function ReplenishmentDashboard() {
                     <Text as="span" variant="bodyMd" fontWeight="bold">
                       Products & Variants
                     </Text>
-                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175" }}>
-                      Pulls title, SKU, images, and live inventory levels across all store locations.
+                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175", lineHeight: "1.4" }}>
+                      Syncs titles, SKUs, product images, and live stock counts across all your store locations.
                     </p>
                   </div>
                   <div>
                     <div style={{ fontSize: "20px", marginBottom: "4px" }}>📈</div>
                     <Text as="span" variant="bodyMd" fontWeight="bold">
-                      Historical Sales Velocity
+                      Historical Sales Pace
                     </Text>
-                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175" }}>
-                      Aggregates past paid orders to compute 7d, 14d, 30d, and 90d Average Daily Sales (ADS).
+                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175", lineHeight: "1.4" }}>
+                      Calculates your 7, 14, 30, and 90-day daily sales pace from past orders to power smart forecasting.
                     </p>
                   </div>
                   <div>
@@ -1464,8 +1527,8 @@ export default function ReplenishmentDashboard() {
                     <Text as="span" variant="bodyMd" fontWeight="bold">
                       Auto-Vendor Discovery
                     </Text>
-                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175" }}>
-                      Detects your brand vendors from Shopify so you can configure lead times with 1 click.
+                    <p style={{ margin: "4px 0 0 0", fontSize: "13px", color: "#6d7175", lineHeight: "1.4" }}>
+                      Automatically identifies your brand suppliers from Shopify so you can set lead times with 1 click.
                     </p>
                   </div>
                 </div>
