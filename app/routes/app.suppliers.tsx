@@ -118,7 +118,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  return { suppliers, rules };
+  const appSettings = await prisma.appSettings.findFirst({ where: { shop } });
+  const selectedPlan = appSettings?.selectedPlan || "growth";
+
+  return { suppliers, rules, selectedPlan };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -129,6 +132,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const intent = String(formData.get("intent"));
 
   if (intent === "CREATE_SUPPLIER") {
+    const appSettings = await prisma.appSettings.findFirst({ where: { shop } });
+    const selectedPlan = appSettings?.selectedPlan || "growth";
+    if (selectedPlan === "starter") {
+      const existingCount = await prisma.supplier.count({ where: { shop } });
+      if (existingCount >= 1) {
+        return {
+          ok: false,
+          error: "Starter Plan ($9/mo) includes 1 primary supplier. Upgrade to Growth ($39/mo) to connect unlimited suppliers and lead times.",
+        };
+      }
+    }
+
     const name = String(formData.get("name") || "").trim();
     const contactName = String(formData.get("contactName") || "").trim();
     const email = String(formData.get("email") || "").trim();
@@ -171,8 +186,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { ok: false, error: "Supplier name is required." };
     }
 
+    const existing = await prisma.supplier.findFirst({
+      where: { id, shop },
+    });
+    if (!existing) {
+      return { ok: false, error: "Supplier not found or does not belong to this store." };
+    }
+
     const updated = await prisma.supplier.update({
-      where: { id },
+      where: { id: existing.id },
       data: {
         name,
         contactName: contactName || null,
@@ -215,6 +237,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { ok: false, error: "No products or variants selected." };
     }
 
+    const sup = await prisma.supplier.findFirst({
+      where: { id: supplierId, shop },
+    });
+    if (!sup) {
+      return { ok: false, error: "Supplier not found or does not belong to this store." };
+    }
+
     // Find all directly selected rules
     const directlySelectedRules = await prisma.variantSupplierRule.findMany({
       where: {
@@ -243,7 +272,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const targetRuleIds = targetRules.map((r) => r.id);
     const updateData: any = {
-      supplierId,
+      supplierId: sup.id,
       packSize,
       minOrderQty,
       safetyStockMinimum,
@@ -253,13 +282,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       updateData.unitCost = unitCost;
     }
 
-    // 1. Update rules in ClearStock PostgreSQL
+    // 1. Update rules in ClearStock PostgreSQL scoped to shop
     await prisma.variantSupplierRule.updateMany({
-      where: { id: { in: targetRuleIds } },
+      where: { id: { in: targetRuleIds }, shop },
       data: updateData,
     });
-
-    const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
 
     // 2. Optional Two-Way Live Sync of Vendor to Shopify (Product Level)
     if (syncVendor && sup) {
@@ -413,7 +440,10 @@ export default function SuppliersPage() {
 
   const suppliers = loaderData?.suppliers || [];
   const rules = loaderData?.rules || [];
+  const selectedPlan = (loaderData as any)?.selectedPlan || "growth";
   const isSubmitting = navigation.state === "submitting";
+
+  const [showStarterSupplierModal, setShowStarterSupplierModal] = useState(false);
 
   // Supplier Profile Modal
   const [modalOpen, setModalOpen] = useState(false);
@@ -536,6 +566,10 @@ export default function SuppliersPage() {
   }, [actionData, shopify]);
 
   const handleOpenCreateModal = () => {
+    if (selectedPlan === "starter" && suppliers.length >= 1) {
+      setShowStarterSupplierModal(true);
+      return;
+    }
     setEditingSupplier(null);
     setName("");
     setContactName("");
@@ -669,6 +703,21 @@ export default function SuppliersPage() {
       ]}
     >
       <BlockStack gap="400">
+        {selectedPlan === "starter" && suppliers.length >= 1 && (
+          <Banner
+            tone="warning"
+            title="Starter Plan: 1 Primary Supplier Included"
+            action={{
+              content: "Upgrade to Growth ($39/mo)",
+              url: "/app/settings#subscription-plan",
+            }}
+          >
+            <Text as="p" variant="bodySm">
+              You are currently utilizing your 1 primary vendor on the Starter Plan. Upgrade to the Growth Plan to unlock unlimited suppliers, customized lead times, and case-pack rounding.
+            </Text>
+          </Banner>
+        )}
+
         {/* Executive KPI Metric Strip */}
         <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="400">
           {/* Card 1: Active Vendors */}
@@ -1346,6 +1395,34 @@ export default function SuppliersPage() {
                   </Card>
                 )}
               </BlockStack>
+            </BlockStack>
+          </Modal.Section>
+        </Modal>
+
+        {/* Starter Plan Supplier Limit Upgrade Modal */}
+        <Modal
+          open={showStarterSupplierModal}
+          onClose={() => setShowStarterSupplierModal(false)}
+          title="Upgrade to Growth for Multi-Supplier Management"
+          primaryAction={{
+            content: "Upgrade to Growth ($39/mo)",
+            url: "/app/settings#subscription-plan",
+          }}
+          secondaryActions={[
+            {
+              content: "Close",
+              onAction: () => setShowStarterSupplierModal(false),
+            },
+          ]}
+        >
+          <Modal.Section>
+            <BlockStack gap="300">
+              <Text as="p" variant="bodyMd">
+                Your store is currently on the <strong>Starter Plan ($9/month)</strong>, which includes 1 primary supplier.
+              </Text>
+              <Text as="p" variant="bodyMd">
+                To add additional vendors, manage separate lead times and currencies per manufacturer, and issue purchase orders to multiple suppliers, please upgrade to the <strong>Growth Plan ($39/month)</strong>.
+              </Text>
             </BlockStack>
           </Modal.Section>
         </Modal>

@@ -171,25 +171,90 @@ export async function deleteShopifyProduct(payload: any, shop: string): Promise<
 
 /**
  * Ingest Order & Update Sub-Second DailySalesAggregator
- * Filters out unpaid or fraudulent orders and aggregates daily units sold.
+ * Filters out unpaid orders, prevents duplicate counting across orders/updated,
+ * handles cancellations, and aggregates daily units sold.
  */
 export async function ingestShopifyOrder(payload: any, shop: string): Promise<void> {
   try {
-    const financialStatus = payload.financial_status;
-    const isCancelled = Boolean(payload.cancelled_at);
+    const rawOrderId = payload?.id ? String(payload.id) : null;
+    const financialStatus = payload?.financial_status;
+    const isCancelled = Boolean(payload?.cancelled_at);
 
-    // Only count paid, active orders towards sales velocity
-    if (isCancelled || (financialStatus !== "paid" && financialStatus !== "partially_paid")) {
-      console.log(`[Order Ingestion] Skipping order ${payload.id}: financial_status=${financialStatus}, cancelled=${isCancelled}`);
-      return;
-    }
-
-    const createdAtStr = payload.created_at || payload.processed_at || new Date().toISOString();
+    const createdAtStr = payload?.created_at || payload?.processed_at || new Date().toISOString();
     const orderDate = new Date(createdAtStr);
     orderDate.setUTCHours(0, 0, 0, 0); // Normalize to UTC midnight
 
-    const lineItems = payload.line_items || [];
+    const lineItems = payload?.line_items || [];
 
+    // Case 1: Order was cancelled -> revert previously aggregated sales if it was counted
+    if (isCancelled && rawOrderId) {
+      const previouslyCounted = await prisma.processedWebhook.findFirst({
+        where: {
+          shop,
+          orderId: rawOrderId,
+          topic: "orders/sales_counted",
+        },
+      });
+
+      if (previouslyCounted) {
+        for (const item of lineItems) {
+          if (!item.variant_id) continue;
+          const variantId = toGid("ProductVariant", item.variant_id);
+          const quantity = parseInt(String(item.quantity || 0), 10);
+          if (quantity <= 0) continue;
+
+          const existingAgg = await prisma.dailySalesAggregator.findUnique({
+            where: {
+              shop_variantId_date: {
+                shop,
+                variantId,
+                date: orderDate,
+              },
+            },
+          });
+
+          if (existingAgg) {
+            await prisma.dailySalesAggregator.update({
+              where: { id: existingAgg.id },
+              data: {
+                unitsSold: Math.max(0, existingAgg.unitsSold - quantity),
+              },
+            });
+          }
+        }
+
+        await prisma.processedWebhook.delete({
+          where: { id: previouslyCounted.id },
+        });
+
+        console.log(`[Order Ingestion] Successfully reverted sales for cancelled order ${rawOrderId} on ${shop}`);
+      }
+      return;
+    }
+
+    // Case 2: Unpaid orders or inactive orders are not counted towards sales velocity
+    if (financialStatus !== "paid" && financialStatus !== "partially_paid") {
+      console.log(`[Order Ingestion] Skipping order ${payload?.id}: financial_status=${financialStatus}, cancelled=${isCancelled}`);
+      return;
+    }
+
+    // Case 3: Prevent duplicate order counting (e.g. orders/create followed by orders/updated)
+    if (rawOrderId) {
+      const alreadyCounted = await prisma.processedWebhook.findFirst({
+        where: {
+          shop,
+          orderId: rawOrderId,
+          topic: "orders/sales_counted",
+        },
+      });
+
+      if (alreadyCounted) {
+        console.log(`[Order Ingestion] Order ${rawOrderId} sales already counted for ${shop}. Skipping.`);
+        return;
+      }
+    }
+
+    // Record sales into DailySalesAggregator
     for (const item of lineItems) {
       if (!item.variant_id) continue;
       const variantId = toGid("ProductVariant", item.variant_id);
@@ -215,6 +280,18 @@ export async function ingestShopifyOrder(payload: any, shop: string): Promise<vo
           variantId,
           date: orderDate,
           unitsSold: quantity,
+        },
+      });
+    }
+
+    // Mark this order as counted to guarantee idempotency across orders/updated
+    if (rawOrderId) {
+      await prisma.processedWebhook.create({
+        data: {
+          id: `sales_counted_${shop}_${rawOrderId}`,
+          shop,
+          topic: "orders/sales_counted",
+          orderId: rawOrderId,
         },
       });
     }

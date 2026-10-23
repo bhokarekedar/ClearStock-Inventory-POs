@@ -18,6 +18,7 @@ import {
   Banner,
   Box,
   Modal,
+  Select,
 } from "@shopify/polaris";
 import {
   AlertCircleIcon,
@@ -46,7 +47,7 @@ export interface ReceivingLineItem {
 }
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const rawId = params.id || "";
   const poIdOrNumber = rawId.toUpperCase();
 
@@ -67,6 +68,27 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 
   if (!po) {
     return redirect("/app/purchase-orders");
+  }
+
+  // 2. Query Store Locations from Shopify GraphQL for Multi-Location Receiving
+  let locations: Array<{ id: string; name: string; isPrimary: boolean; isActive: boolean }> = [];
+  try {
+    const locRes = await admin.graphql(`
+      query GetStoreLocations {
+        locations(first: 20) {
+          nodes {
+            id
+            name
+            isPrimary
+            isActive
+          }
+        }
+      }
+    `);
+    const locJson: any = await locRes.json();
+    locations = (locJson.data?.locations?.nodes || []).filter((l: any) => l.isActive);
+  } catch (err) {
+    console.warn("[PO Locations Query]", err);
   }
 
   return {
@@ -102,7 +124,9 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         };
       }),
     },
+    locations,
     shopDomain: session.shop,
+    selectedPlan: (await prisma.appSettings.findFirst({ where: { shop: session.shop } }))?.selectedPlan || "growth",
   };
 };
 
@@ -112,10 +136,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const intent = String(formData.get("intent") || "COMMIT_RECEIVED");
   const poId = String(formData.get("poId"));
 
+  // Multi-Tenant Security Guard: Enforce strict shop scoping to prevent IDOR
+  const targetPo = await prisma.purchaseOrder.findFirst({
+    where: { id: poId, shop: session.shop },
+  });
+
+  if (!targetPo) {
+    return { ok: false, error: "Purchase order not found or access denied." };
+  }
+
   // 1. Issue PO to Supplier (DRAFT -> ORDERED)
   if (intent === "ISSUE_PO") {
     await prisma.purchaseOrder.update({
-      where: { id: poId },
+      where: { id: targetPo.id },
       data: { status: "ORDERED" },
     });
     return { ok: true, status: "ORDERED", message: "Purchase order issued to supplier. Status is now ORDERED." };
@@ -124,7 +157,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // 2. Cancel Purchase Order (for issued orders)
   if (intent === "CANCEL_PO") {
     await prisma.purchaseOrder.update({
-      where: { id: poId },
+      where: { id: targetPo.id },
       data: { status: "CANCELLED" },
     });
     return { ok: true, status: "CANCELLED", message: "Purchase order has been cancelled." };
@@ -132,14 +165,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   // 2.5 Delete Draft Purchase Order (permanently deletes unissued draft)
   if (intent === "DELETE_DRAFT") {
-    const po = await prisma.purchaseOrder.findUnique({
-      where: { id: poId },
-    });
-    if (po && po.status === "DRAFT") {
+    if (targetPo.status === "DRAFT") {
       await prisma.purchaseOrder.delete({
-        where: { id: poId },
+        where: { id: targetPo.id },
       });
-      return redirect(`/app/purchase-orders?deleted=${po.poNumber}`);
+      return redirect(`/app/purchase-orders?deleted=${targetPo.poNumber}`);
     }
     return { ok: false, message: "Only draft purchase orders can be deleted." };
   }
@@ -154,18 +184,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // Fetch previous state for incremental delta calculation
     const existingItems = await prisma.purchaseOrderItem.findMany({
-      where: { purchaseOrderId: poId },
+      where: { purchaseOrderId: targetPo.id },
     });
 
     for (const item of itemsToUpdate) {
-      await prisma.purchaseOrderItem.update({
-        where: { id: item.id },
+      await prisma.purchaseOrderItem.updateMany({
+        where: { id: item.id, purchaseOrderId: targetPo.id },
         data: { quantityReceived: Math.max(0, Number(item.receivedQty)) },
       });
     }
 
     const allItems = await prisma.purchaseOrderItem.findMany({
-      where: { purchaseOrderId: poId },
+      where: { purchaseOrderId: targetPo.id },
     });
 
     const allReceived = allItems.every((i) => i.quantityReceived >= i.quantityOrdered);
@@ -173,7 +203,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const newStatus = allReceived ? "RECEIVED" : anyReceived ? "PARTIALLY_RECEIVED" : "ORDERED";
 
     const updatedPo = await prisma.purchaseOrder.update({
-      where: { id: poId },
+      where: { id: targetPo.id },
       data: { status: newStatus },
     });
 
@@ -182,8 +212,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     try {
       const locResponse = await admin.graphql(`
         #graphql
-        query GetStorePrimaryLocation {
-          locations(first: 10) {
+        query GetStoreLocations {
+          locations(first: 20) {
             nodes {
               id
               name
@@ -196,9 +226,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const locData = await locResponse.json();
       const locationsList = locData.data?.locations?.nodes || [];
       const primaryLocation = locationsList.find((l: any) => l.isPrimary && l.isActive) || locationsList.find((l: any) => l.isActive);
-      const primaryLocationId = primaryLocation?.id;
+      const requestedLocationId = String(formData.get("locationId") || "");
+      
+      const appSettings = await prisma.appSettings.findFirst({ where: { shop: session.shop } });
+      const isScalePlan = appSettings?.selectedPlan === "scale";
 
-      if (primaryLocationId) {
+      // Scale Plan feature: custom warehouse routing is only enabled for Scale tier
+      const targetLocation = isScalePlan
+        ? locationsList.find((l: any) => l.id === requestedLocationId && l.isActive) || primaryLocation
+        : primaryLocation;
+      const targetLocationId = targetLocation?.id;
+
+      if (targetLocationId) {
         const changes: Array<{ inventoryItemId: string; locationId: string; delta: number }> = [];
 
         for (const update of itemsToUpdate) {
@@ -209,7 +248,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           if (delta > 0 && prevItem?.inventoryItemId && prevItem.inventoryItemId.startsWith("gid://shopify/InventoryItem/")) {
             changes.push({
               inventoryItemId: prevItem.inventoryItemId,
-              locationId: primaryLocationId,
+              locationId: targetLocationId,
               delta,
             });
 
@@ -260,7 +299,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             console.error("[Shopify Inventory Sync Error]", adjData.data.inventoryAdjustQuantities.userErrors);
           } else {
             liveSyncStatus = " • Synced to Shopify available inventory";
-            console.log(`[Shopify Live Sync] Successfully adjusted ${changes.length} items at primary location ${primaryLocation.name} (${primaryLocationId})`);
+            console.log(`[Shopify Live Sync] Successfully adjusted ${changes.length} items at target location ${targetLocation?.name} (${targetLocationId})`);
           }
         }
       }
@@ -285,10 +324,15 @@ export default function PurchaseOrderDetailsAndReceiving() {
 
   const isSubmitting = navigation.state === "submitting";
 
-  const { po, shopDomain } = loaderData;
+  const { po, locations, shopDomain, selectedPlan } = loaderData;
   const poNumber = po.poNumber;
   const supplierName = po.supplierName;
   const carrier = po.carrier;
+
+  const [selectedLocationId, setSelectedLocationId] = useState<string>(() => {
+    const primary = (locations || []).find((l: any) => l.isPrimary);
+    return primary ? primary.id : (locations && locations[0]?.id) || "";
+  });
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [isReceivingMode, setIsReceivingMode] = useState<boolean>(searchParams.get("mode") === "receive");
@@ -398,6 +442,7 @@ export default function PurchaseOrderDetailsAndReceiving() {
       {
         intent: "COMMIT_RECEIVED",
         poId: po.id,
+        locationId: selectedLocationId,
         items: JSON.stringify(
           items.map((i) => ({ id: i.id, receivedQty: i.receivedQty })),
         ),
@@ -1252,6 +1297,37 @@ export default function PurchaseOrderDetailsAndReceiving() {
                 </Text>
               </Banner>
             ) : null}
+
+            {locations && locations.length > 0 && (
+              <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+                <BlockStack gap="200">
+                  {selectedPlan === "scale" ? (
+                    <Select
+                      label="Destination Location / Warehouse"
+                      options={locations.map((loc: any) => ({
+                        label: `${loc.name}${loc.isPrimary ? " (Primary Location)" : ""}`,
+                        value: loc.id,
+                      }))}
+                      value={selectedLocationId}
+                      onChange={(val) => setSelectedLocationId(val)}
+                      helpText="Scale Plan feature: Stock levels will be directly credited to this specific Shopify warehouse."
+                    />
+                  ) : (
+                    <BlockStack gap="100">
+                      <InlineStack align="space-between" blockAlign="center">
+                        <Text as="p" variant="bodySm" fontWeight="semibold">
+                          Receiving Location: {(locations.find((l: any) => l.isPrimary) || locations[0])?.name || "Primary Store Location"}
+                        </Text>
+                        <Badge tone="info">Default Primary</Badge>
+                      </InlineStack>
+                      <Text as="p" variant="bodyXs" tone="subdued">
+                        🔒 Multi-Warehouse Stock Receiving is available on the <strong>Scale Plan ($89/mo)</strong>. Stock will be received into your primary location.
+                      </Text>
+                    </BlockStack>
+                  )}
+                </BlockStack>
+              </Box>
+            )}
 
             <BlockStack gap="200">
               <Text as="p" variant="bodyMd" fontWeight="semibold">

@@ -374,6 +374,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   // 3. ADD / CONFIGURE SUPPLIER (Step 3)
   if (intent === "ADD_SUPPLIER") {
+    const appSettings = await prisma.appSettings.findFirst({ where: { shop: session.shop } });
+    if (appSettings?.selectedPlan === "starter") {
+      const existingCount = await prisma.supplier.count({ where: { shop: session.shop } });
+      if (existingCount >= 1) {
+        return {
+          ok: false,
+          error: "Starter Plan ($9/mo) includes 1 primary supplier. Upgrade to Growth ($39/mo) to add unlimited suppliers.",
+        };
+      }
+    }
+
     const name = String(formData.get("name") || "").trim();
     const email = String(formData.get("email") || "").trim();
     const defaultLeadTime = parseInt(String(formData.get("defaultLeadTime") || "14"), 10);
@@ -742,6 +753,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     shop,
     onboardingCompleted: Boolean(appSettings?.onboardingCompleted),
     selectedPlan: appSettings?.selectedPlan || "growth",
+    safetyFormulaModel: (appSettings as any)?.safetyFormulaModel || "standard",
     detectedVendors: Array.from(rawVendors),
     ordersCount,
   };
@@ -780,6 +792,7 @@ export function computeReplenishmentMath(
   item: ReplenishmentItem,
   windowDays: 7 | 14 | 30 | 90 = 30,
   reorderFrequencyDays: number = 30,
+  safetyFormulaModel: string = "standard",
 ) {
   const adsMap = {
     7: item.ads7d,
@@ -789,13 +802,24 @@ export function computeReplenishmentMath(
   };
   const ads = adsMap[windowDays];
 
+  // Multiplier from Custom Safety Stock Formula Model (Scale Plan Feature)
+  const formulaMultiplier =
+    safetyFormulaModel === "surge"
+      ? 1.25
+      : safetyFormulaModel === "aggressive"
+      ? 1.50
+      : safetyFormulaModel === "lean"
+      ? 0.80
+      : 1.0;
+
   // 1. Lead time demand (units sold while waiting for supplier delivery)
   // High-precision float is maintained throughout intermediate calculations
   const leadTimeDemand = ads * item.leadTimeDays;
 
   // 2. Safety stock (buffer for spikes & shipping delays)
+  // Scaled by custom safety formula multiplier
   // Floor Min (item.safetyStockMinimum) prevents slow-moving items from having zero buffer
-  const safetyStockFromDays = ads * item.safetyStockDays;
+  const safetyStockFromDays = ads * item.safetyStockDays * formulaMultiplier;
   const safetyStock = Math.max(
     Math.round(safetyStockFromDays),
     item.safetyStockMinimum,
@@ -889,6 +913,8 @@ export function computeReplenishmentMath(
     isOverstocked,
     deadCashValue,
     isBelowReorderPoint,
+    formulaMultiplier,
+    safetyFormulaModel,
   };
 }
 
@@ -922,6 +948,17 @@ export default function ReplenishmentDashboard() {
     (loaderData?.selectedPlan as any) || "growth",
   );
 
+  // Enforce Wizard progression: Never allow skipping ahead to incomplete steps
+  useEffect(() => {
+    if (viewMode === "wizard") {
+      if (items.length === 0 && wizardStep > 1) {
+        setWizardStep(1);
+      } else if (suppliers.length === 0 && wizardStep === 4) {
+        setWizardStep(3);
+      }
+    }
+  }, [items.length, suppliers.length, wizardStep, viewMode]);
+
   // Modals state
   const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
   const [guideDefaultTab, setGuideDefaultTab] = useState<"math" | "pos" | "sync" | "faqs">("math");
@@ -938,9 +975,10 @@ export default function ReplenishmentDashboard() {
   // Dashboard Filters & Controls
   const [selectedSupplier, setSelectedSupplier] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [rollingWindow, setRollingWindow] = useState<"7" | "14" | "30" | "90">(
-    loaderData?.defaultLookbackWindow || "30",
-  );
+  const [rollingWindow, setRollingWindow] = useState<"7" | "14" | "30" | "90">(() => {
+    if (loaderData?.selectedPlan === "starter") return "30";
+    return loaderData?.defaultLookbackWindow || "30";
+  });
   const [filterStatus, setFilterStatus] = useState<
     "all" | "Reorder Now" | "Overstocked" | "Incoming" | "Stock OK"
   >("all");
@@ -990,13 +1028,45 @@ export default function ReplenishmentDashboard() {
   const [mathModalTab, setMathModalTab] = useState<"story" | "formula">("story");
   const windowDaysNum = parseInt(rollingWindow, 10) as 7 | 14 | 30 | 90;
 
+  const selectedPlan = (loaderData?.selectedPlan as string) || "growth";
+  const rawSafetyFormulaModel = (loaderData as any)?.safetyFormulaModel || "standard";
+  // Scale Plan gate: custom safety formula models only apply to Scale tier
+  const effectiveSafetyFormulaModel = selectedPlan === "scale" ? rawSafetyFormulaModel : "standard";
+  const isStarter = selectedPlan === "starter";
+  const isSkuLimitExceeded = isStarter && items.length > 50;
+
+  // Starter Plan Gate: Prioritize top 50 revenue-generating SKUs by 30D sales
+  const activeItems = useMemo(() => {
+    if (!isStarter) return items;
+    return [...items]
+      .sort((a, b) => b.unitsSold30d - a.unitsSold30d || a.title.localeCompare(b.title))
+      .slice(0, 50);
+  }, [items, isStarter]);
+
+  // Keep rollingWindow locked to 30D on Starter plan
+  useEffect(() => {
+    if (isStarter && rollingWindow !== "30") {
+      setRollingWindow("30");
+    }
+  }, [isStarter, rollingWindow]);
+
+  const handleWindowChange = (w: "7" | "14" | "30" | "90") => {
+    if (isStarter && w !== "30") {
+      shopify.toast.show(
+        "7D, 14D, and 90D velocity smoothing requires the Growth Plan ($39/mo). Upgrade in Settings.",
+      );
+      return;
+    }
+    setRollingWindow(w);
+  };
+
   // Process rows with calculations
   const calculatedRows = useMemo(() => {
-    return items.map((item) => ({
+    return activeItems.map((item) => ({
       ...item,
-      calc: computeReplenishmentMath(item, windowDaysNum),
+      calc: computeReplenishmentMath(item, windowDaysNum, 30, effectiveSafetyFormulaModel),
     }));
-  }, [items, windowDaysNum]);
+  }, [activeItems, windowDaysNum, effectiveSafetyFormulaModel]);
 
   // Filtered rows for Dashboard
   const filteredRows = useMemo(() => {
@@ -1166,6 +1236,12 @@ export default function ReplenishmentDashboard() {
   };
 
   const handleQuickAddVendor = (vendorName: string) => {
+    if (isStarter && suppliers.length >= 1) {
+      shopify.toast.show(
+        "Starter Plan includes 1 primary supplier. Upgrade to Growth ($39/mo) to link multiple vendors.",
+      );
+      return;
+    }
     submit(
       {
         intent: "ADD_SUPPLIER",
@@ -1206,7 +1282,7 @@ export default function ReplenishmentDashboard() {
   };
 
   const activeMath = activeMathItem
-    ? computeReplenishmentMath(activeMathItem, windowDaysNum)
+    ? computeReplenishmentMath(activeMathItem, windowDaysNum, 30, effectiveSafetyFormulaModel)
     : null;
 
   return (
@@ -1330,8 +1406,56 @@ export default function ReplenishmentDashboard() {
                 { num: 3, label: "3. Primary Supplier" },
                 { num: 4, label: "4. Ready & Restock" },
               ].map((step, idx) => {
-                const isDone = wizardStep > step.num;
+                const isStep1Done = items.length > 0;
+                const isStep2Done = isStep1Done && wizardStep > 2;
+                const isStep3Done = isStep1Done && suppliers.length > 0;
+
+                const isStepComplete =
+                  step.num === 1
+                    ? isStep1Done
+                    : step.num === 2
+                    ? isStep2Done
+                    : step.num === 3
+                    ? isStep3Done
+                    : false;
+
+                const isDone = isStepComplete && wizardStep > step.num;
                 const isCurrent = wizardStep === step.num;
+
+                // Step accessibility rules:
+                // Step 1: always accessible
+                // Step 2 & 3: requires Step 1 (catalog synced)
+                // Step 4: requires Step 1 (catalog synced) AND Step 3 (at least one supplier configured)
+                const isAccessible =
+                  step.num === 1
+                    ? true
+                    : step.num === 2 || step.num === 3
+                    ? isStep1Done
+                    : isStep1Done && isStep3Done;
+
+                const handleStepClick = () => {
+                  if (step.num === wizardStep) return;
+
+                  if (!isStep1Done && step.num > 1) {
+                    shopify.toast.show(
+                      "Please connect and sync your Shopify catalog first.",
+                      { isError: true },
+                    );
+                    return;
+                  }
+
+                  if (step.num === 4 && suppliers.length === 0) {
+                    shopify.toast.show(
+                      "Please configure at least one supplier and lead time first.",
+                      { isError: true },
+                    );
+                    return;
+                  }
+
+                  if (isAccessible) {
+                    setWizardStep(step.num);
+                  }
+                };
 
                 return (
                   <div
@@ -1343,12 +1467,19 @@ export default function ReplenishmentDashboard() {
                     }}
                   >
                     <div
-                      onClick={() => setWizardStep(step.num)}
+                      onClick={handleStepClick}
+                      title={
+                        isAccessible
+                          ? `Go to ${step.label}`
+                          : "Complete previous steps to unlock"
+                      }
                       style={{
                         display: "flex",
                         flexDirection: "column",
                         alignItems: "center",
-                        cursor: "pointer",
+                        cursor: isAccessible ? "pointer" : "not-allowed",
+                        opacity: isAccessible ? 1 : 0.45,
+                        transition: "all 0.2s ease-in-out",
                       }}
                     >
                       <div
@@ -1367,7 +1498,12 @@ export default function ReplenishmentDashboard() {
                             ? "#008060"
                             : "#f6f6f7",
                           color: isDone || isCurrent ? "#ffffff" : "#6d7175",
-                          border: isCurrent ? "2px solid #008060" : "1px solid #d2d5d8",
+                          border: isCurrent
+                            ? "2px solid #008060"
+                            : isDone
+                            ? "1px solid #108043"
+                            : "1px solid #d2d5d8",
+                          boxShadow: isCurrent ? "0 0 0 3px rgba(0, 128, 96, 0.2)" : "none",
                           transition: "all 0.2s ease-in-out",
                         }}
                       >
@@ -1378,7 +1514,7 @@ export default function ReplenishmentDashboard() {
                           marginTop: "6px",
                           fontSize: "12px",
                           fontWeight: isCurrent ? "700" : "500",
-                          color: isCurrent ? "#202223" : "#6d7175",
+                          color: isCurrent ? "#202223" : isAccessible ? "#6d7175" : "#8c9196",
                           whiteSpace: "nowrap",
                         }}
                       >
@@ -1392,7 +1528,13 @@ export default function ReplenishmentDashboard() {
                           flex: 1,
                           height: "2px",
                           margin: "0 10px 18px 10px",
-                          backgroundColor: isDone ? "#108043" : "#e1e3e5",
+                          backgroundColor:
+                            idx === 0
+                              ? isStep1Done ? "#108043" : "#e1e3e5"
+                              : idx === 1
+                              ? isStep2Done ? "#108043" : "#e1e3e5"
+                              : isStep3Done ? "#108043" : "#e1e3e5",
+                          transition: "background-color 0.3s ease",
                         }}
                       />
                     )}
@@ -1609,14 +1751,14 @@ export default function ReplenishmentDashboard() {
                       {chosenPlan === "starter" && <Badge tone="success">Selected</Badge>}
                     </div>
                     <div style={{ fontSize: "28px", fontWeight: "800", color: "#202223", margin: "12px 0 6px 0" }}>
-                      $0 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
+                      $9 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
                     </div>
                     <Text as="p" tone="subdued">
-                      Ideal for emerging boutique stores testing inventory automation.
+                      Perfect for the serious boutique store testing inventory automation.
                     </Text>
                     <div style={{ marginTop: "16px", borderTop: "1px solid #e1e3e5", paddingTop: "14px" }}>
                       <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#5c5f62", lineHeight: "1.7" }}>
-                        <li>Up to 50 active SKUs</li>
+                        <li>Max 50 Active SKUs</li>
                         <li>1 Primary Supplier</li>
                         <li>30-Day Sales Velocity (ADS)</li>
                         <li>Automated PO Drafting</li>
@@ -1663,16 +1805,16 @@ export default function ReplenishmentDashboard() {
                       {chosenPlan === "growth" && <Badge tone="success">Selected</Badge>}
                     </div>
                     <div style={{ fontSize: "28px", fontWeight: "800", color: "#202223", margin: "12px 0 6px 0" }}>
-                      $19 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
+                      $39 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
                     </div>
                     <Text as="p" tone="subdued">
-                      Full replenishment power for multi-supplier brands.
+                      The sweet spot for the vast majority of growing mid-market merchants.
                     </Text>
                     <div style={{ marginTop: "16px", borderTop: "1px solid #e1e3e5", paddingTop: "14px" }}>
                       <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#202223", lineHeight: "1.7" }}>
                         <li><strong>Unlimited SKUs & Variants</strong></li>
-                        <li><strong>Multi-Supplier & Lead Times</strong></li>
-                        <li>7, 14, 30, and 90D Velocity Toggle</li>
+                        <li><strong>Multi-Supplier & Custom Lead Times</strong></li>
+                        <li>7, 14, 30, and 90D Velocity Toggles</li>
                         <li>Case Pack & MOQ Rounding</li>
                         <li>One-Click Inbound PO Receiving</li>
                       </ul>
@@ -1702,10 +1844,10 @@ export default function ReplenishmentDashboard() {
                       {chosenPlan === "scale" && <Badge tone="success">Selected</Badge>}
                     </div>
                     <div style={{ fontSize: "28px", fontWeight: "800", color: "#202223", margin: "12px 0 6px 0" }}>
-                      $49 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
+                      $89 <span style={{ fontSize: "14px", fontWeight: "500", color: "#6d7175" }}>/ month</span>
                     </div>
                     <Text as="p" tone="subdued">
-                      High-volume operations and multi-location warehouses.
+                      For mature operations managing complex logistics and multi-locations.
                     </Text>
                     <div style={{ marginTop: "16px", borderTop: "1px solid #e1e3e5", paddingTop: "14px" }}>
                       <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#5c5f62", lineHeight: "1.7" }}>
@@ -1749,7 +1891,15 @@ export default function ReplenishmentDashboard() {
                   <Button
                     variant="primary"
                     icon={PlusIcon}
-                    onClick={() => setShowSupplierModal(true)}
+                    onClick={() => {
+                      if (isStarter && suppliers.length >= 1) {
+                        shopify.toast.show(
+                          "Starter Plan includes 1 primary supplier. Upgrade to Growth ($39/mo) to add multiple vendors.",
+                        );
+                        return;
+                      }
+                      setShowSupplierModal(true);
+                    }}
                   >
                     + Add Custom Supplier
                   </Button>
@@ -1993,6 +2143,21 @@ export default function ReplenishmentDashboard() {
       {/* ════════════════════════════════════════════════════════════ */}
       {viewMode === "dashboard" && (
         <BlockStack gap="500">
+          {isSkuLimitExceeded && (
+            <Banner
+              tone="warning"
+              title="Starter Plan: 50 SKU Limit Active"
+              action={{
+                content: "Upgrade to Growth ($39/mo)",
+                url: "/app/settings#subscription-plan",
+              }}
+            >
+              <Text as="p" variant="bodySm">
+                You are currently viewing the top 50 SKUs on the Starter Plan. Your store has {items.length} total active items. Upgrade to the Growth Plan for unlimited catalog monitoring, multi-supplier lead times, and automated PO drafting.
+              </Text>
+            </Banner>
+          )}
+
           {/* Eye-Friendly Modern KPI Summary Cards (4 Actionable States in 1 Row) */}
           <InlineGrid columns={{ xs: 1, sm: 2, md: 4 }} gap="300">
             {/* Card 1: Reorder Now (Urgent Action - Warm Rose Gradient) */}
@@ -2228,30 +2393,30 @@ export default function ReplenishmentDashboard() {
                       <Button
                         size="slim"
                         pressed={rollingWindow === "7"}
-                        onClick={() => setRollingWindow("7")}
+                        onClick={() => handleWindowChange("7")}
                       >
-                        7D
+                        {isStarter ? "🔒 7D" : "7D"}
                       </Button>
                       <Button
                         size="slim"
                         pressed={rollingWindow === "14"}
-                        onClick={() => setRollingWindow("14")}
+                        onClick={() => handleWindowChange("14")}
                       >
-                        14D
+                        {isStarter ? "🔒 14D" : "14D"}
                       </Button>
                       <Button
                         size="slim"
                         pressed={rollingWindow === "30"}
-                        onClick={() => setRollingWindow("30")}
+                        onClick={() => handleWindowChange("30")}
                       >
                         30D
                       </Button>
                       <Button
                         size="slim"
                         pressed={rollingWindow === "90"}
-                        onClick={() => setRollingWindow("90")}
+                        onClick={() => handleWindowChange("90")}
                       >
-                        90D
+                        {isStarter ? "🔒 90D" : "90D"}
                       </Button>
                     </ButtonGroup>
                   </InlineStack>
@@ -2824,7 +2989,7 @@ export default function ReplenishmentDashboard() {
                             • <strong>{activeMath.leadTimeDemand} units</strong> needed to cover customer sales while waiting <strong>{activeMathItem.leadTimeDays} days</strong> for delivery from {activeMathItem.supplierName}.
                           </Text>
                           <Text as="p" variant="bodyMd">
-                            • <strong>+ {activeMath.safetyStock} units</strong> kept as a safety cushion ({activeMathItem.safetyStockDays} days of buffer{activeMathItem.safetyStockMinimum > 0 && activeMath.safetyStock === activeMathItem.safetyStockMinimum ? ` - enforced by your ${activeMathItem.safetyStockMinimum}-unit floor` : ""}).
+                            • <strong>+ {activeMath.safetyStock} units</strong> kept as a safety cushion ({activeMathItem.safetyStockDays} days of buffer{activeMath.formulaMultiplier !== 1.0 ? ` × ${activeMath.formulaMultiplier}x ${activeMath.safetyFormulaModel === "surge" ? "Surge Protection" : activeMath.safetyFormulaModel === "aggressive" ? "Aggressive Peak" : "Lean JIT"} model` : ""}{activeMathItem.safetyStockMinimum > 0 && activeMath.safetyStock === activeMathItem.safetyStockMinimum ? ` - enforced by your ${activeMathItem.safetyStockMinimum}-unit floor` : ""}).
                           </Text>
                           <Divider />
                           <Text as="p" variant="bodyMd" fontWeight="semibold">
@@ -2959,7 +3124,7 @@ export default function ReplenishmentDashboard() {
                   </div>
                   <div>
                     <strong>3. Safety Stock Buffer:</strong>{" "}
-                    <code>{activeMath.safetyStock} units</code> (Max of {activeMathItem.safetyStockDays}d coverage: {Math.round(activeMath.ads * activeMathItem.safetyStockDays)} units, Floor Min: {activeMathItem.safetyStockMinimum} units)
+                    <code>{activeMath.safetyStock} units</code> (Formula: {activeMathItem.safetyStockDays}d coverage{activeMath.formulaMultiplier !== 1.0 ? ` × ${activeMath.formulaMultiplier}x model` : ""}: {Math.round(activeMath.ads * activeMathItem.safetyStockDays * activeMath.formulaMultiplier)} units, Floor Min: {activeMathItem.safetyStockMinimum} units)
                   </div>
                   <div>
                     <strong>4. Reorder Point (ROP Floor):</strong>{" "}
@@ -3008,6 +3173,7 @@ export default function ReplenishmentDashboard() {
         isOpen={showSupportModal}
         onClose={() => setShowSupportModal(false)}
         shop={shop}
+        plan={selectedPlan}
       />
 
       {/* 5. Sticky Floating PO Creation Bar (Eliminates scrolling to top after selecting products) */}

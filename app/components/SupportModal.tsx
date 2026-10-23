@@ -4,9 +4,10 @@ interface SupportModalProps {
   isOpen: boolean;
   onClose: () => void;
   shop: string;
+  plan?: string;
 }
 
-export function SupportModal({ isOpen, onClose, shop }: SupportModalProps) {
+export function SupportModal({ isOpen, onClose, shop, plan }: SupportModalProps) {
   const [subject, setSubject] = useState("");
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
@@ -88,11 +89,28 @@ export function SupportModal({ isOpen, onClose, shop }: SupportModalProps) {
             backgroundColor: "#f9fafb",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
             <span style={{ fontSize: "20px" }}>💬</span>
             <h2 id="support-modal-title" style={{ fontSize: "16px", fontWeight: "700", color: "#202223", margin: 0 }}>
               ClearStock Support & Developer Help
             </h2>
+            {plan === "scale" && (
+              <span
+                style={{
+                  backgroundColor: "#ecfdf5",
+                  color: "#065f46",
+                  border: "1px solid #a7f3d0",
+                  borderRadius: "9999px",
+                  fontSize: "11px",
+                  fontWeight: "700",
+                  padding: "2px 8px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                ⚡ Priority 1h SLA
+              </span>
+            )}
           </div>
           <button
             type="button"

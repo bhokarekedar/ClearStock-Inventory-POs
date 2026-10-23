@@ -171,9 +171,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
   });
 
-  // 3. Determine next sequential PO number
-  const poCount = await prisma.purchaseOrder.count();
-  const nextPoNumber = `PO-${1002 + poCount}`;
+  // 3. Determine next sequential PO number scoped strictly to this merchant store
+  const poCount = await prisma.purchaseOrder.count({ where: { shop } });
+  let nextSeq = 1001 + poCount;
+  let nextPoNumber = `PO-${nextSeq}`;
+  while (await prisma.purchaseOrder.findUnique({ where: { shop_poNumber: { shop, poNumber: nextPoNumber } } })) {
+    nextSeq++;
+    nextPoNumber = `PO-${nextSeq}`;
+  }
 
   // 4. Fetch rules for selected items (from Replenishment page)
   const selectedRules =
@@ -259,12 +264,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const statusParam = String(formData.get("status") || "DRAFT");
   const poStatus = statusParam === "ORDERED" ? "ORDERED" : "DRAFT";
 
+  // Multi-Store Isolation: Verify supplier belongs to this authenticated store
+  const supplier = await prisma.supplier.findFirst({
+    where: { id: supplierId, shop },
+  });
+  if (!supplier) {
+    return { error: "Selected supplier does not exist or does not belong to this store." };
+  }
+
+  // Ensure PO number is non-empty and unique for this shop
+  let finalPoNumber = poNumber.trim();
+  if (!finalPoNumber) {
+    const poCount = await prisma.purchaseOrder.count({ where: { shop } });
+    finalPoNumber = `PO-${1001 + poCount}`;
+  }
+  const existingPo = await prisma.purchaseOrder.findUnique({
+    where: { shop_poNumber: { shop, poNumber: finalPoNumber } },
+  });
+  if (existingPo) {
+    finalPoNumber = `${finalPoNumber}-${Date.now().toString().slice(-4)}`;
+  }
+
   // Persist Purchase Order into PostgreSQL
   const po = await prisma.purchaseOrder.create({
     data: {
       shop,
-      poNumber,
-      supplierId,
+      poNumber: finalPoNumber,
+      supplierId: supplier.id,
       status: poStatus,
       expectedArrival,
       notes,

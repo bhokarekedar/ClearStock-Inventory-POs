@@ -41,16 +41,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const poId = String(formData.get("poId"));
 
   if (intent === "DELETE_DRAFT") {
-    const po = await prisma.purchaseOrder.findUnique({
-      where: { id: poId },
+    const po = await prisma.purchaseOrder.findFirst({
+      where: { id: poId, shop: session.shop },
     });
     if (po && po.status === "DRAFT") {
       await prisma.purchaseOrder.delete({
-        where: { id: poId },
+        where: { id: po.id },
       });
       return { ok: true, deletedPo: po.poNumber };
     }
-    return { ok: false, error: "Only draft purchase orders can be deleted." };
+    return { ok: false, error: "Only draft purchase orders belonging to your store can be deleted." };
   }
 
   return { ok: false };

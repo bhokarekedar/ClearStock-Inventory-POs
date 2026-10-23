@@ -92,6 +92,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { ok: true, relaunchWizard: true, message: "Onboarding Wizard reset. Redirecting..." };
   }
 
+  // 1.5 SWITCH SUBSCRIPTION PLAN TIER
+  if (intent === "CHANGE_PLAN") {
+    const newPlan = String(formData.get("plan") || "growth");
+    const updated = await prisma.appSettings.upsert({
+      where: { shop },
+      update: { selectedPlan: newPlan },
+      create: { shop, selectedPlan: newPlan },
+    });
+    return { ok: true, planUpdated: true, settings: updated, message: `Subscription plan switched to ${newPlan.toUpperCase()} ($${newPlan === "starter" ? "9" : newPlan === "scale" ? "89" : "39"}/mo).` };
+  }
+
   // 2. FULL HISTORICAL RE-SYNC
   if (intent === "FULL_RESYNC") {
     try {
@@ -292,7 +303,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const defaultLookbackWindow = parseInt(String(formData.get("defaultLookbackWindow") || "30"), 10);
   const defaultSafetyStockDays = parseInt(String(formData.get("defaultSafetyStockDays") || "7"), 10);
   const defaultLeadTimeDays = parseInt(String(formData.get("defaultLeadTimeDays") || "14"), 10);
-  const autoRoundCasePacks = formData.get("autoRoundCasePacks") === "true";
+
+  // Plan feature checks: custom safety formula requires Scale; case pack rounding requires Growth+
+  const existingSettings = await prisma.appSettings.findFirst({ where: { shop } });
+  const isScaleTier = existingSettings?.selectedPlan === "scale";
+  const isStarterTier = existingSettings?.selectedPlan === "starter";
+  const requestedModel = String(formData.get("safetyFormulaModel") || "standard");
+  const safetyFormulaModel = isScaleTier ? requestedModel : "standard";
+  const autoRoundCasePacks = isStarterTier ? false : formData.get("autoRoundCasePacks") === "true";
 
   const settings = await prisma.appSettings.upsert({
     where: { shop },
@@ -301,6 +319,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       defaultSafetyStockDays,
       defaultLeadTimeDays,
       autoRoundCasePacks,
+      safetyFormulaModel,
     },
     create: {
       shop,
@@ -308,6 +327,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       defaultSafetyStockDays,
       defaultLeadTimeDays,
       autoRoundCasePacks,
+      safetyFormulaModel,
     },
   });
 
@@ -330,6 +350,12 @@ export default function SettingsPage() {
   const [defaultSafetyDays, setDefaultSafetyDays] = useState<string>(String(settings.defaultSafetyStockDays));
   const [defaultLeadTime, setDefaultLeadTime] = useState<string>(String(settings.defaultLeadTimeDays));
   const [autoRound, setAutoRound] = useState<boolean>(settings.autoRoundCasePacks);
+  const [safetyFormulaModel, setSafetyFormulaModel] = useState<string>((settings as any).safetyFormulaModel || "standard");
+  const [currentPlan, setCurrentPlan] = useState<string>(settings.selectedPlan || "growth");
+
+  useEffect(() => {
+    setCurrentPlan(settings.selectedPlan || "growth");
+  }, [settings.selectedPlan]);
 
   // Modals state
   const [showSupportModal, setShowSupportModal] = useState(false);
@@ -387,6 +413,7 @@ export default function SettingsPage() {
         defaultSafetyStockDays: defaultSafetyDays,
         defaultLeadTimeDays: defaultLeadTime,
         autoRoundCasePacks: String(autoRound),
+        safetyFormulaModel,
       },
       { method: "post" },
     );
@@ -436,15 +463,19 @@ export default function SettingsPage() {
                     <InlineStack gap="200" blockAlign="center">
                       <Text as="span" variant="headingMd">
                         {settings.selectedPlan === "starter"
-                          ? "Starter Plan ($0/mo)"
+                          ? "Starter Plan ($9/mo)"
                           : settings.selectedPlan === "scale"
-                          ? "Scale Enterprise ($49/mo)"
-                          : "Growth Plan ($19/mo)"}
+                          ? "Scale Enterprise ($89/mo)"
+                          : "Growth Plan ($39/mo)"}
                       </Text>
                       <Badge tone="success">Active (14-Day Trial)</Badge>
                     </InlineStack>
                     <Text as="p" variant="bodySm" tone="subdued">
-                      Unlimited SKUs, multi-supplier lead times, and automated Purchase Orders.
+                      {settings.selectedPlan === "starter"
+                        ? "Up to 50 SKUs, 1 primary supplier, 30-day sales velocity, and automated PO drafting."
+                        : settings.selectedPlan === "scale"
+                        ? "Unlimited SKUs, multi-location stock balancing, custom safety stock formulas, priority support."
+                        : "Unlimited SKUs & variants, multi-supplier lead times, 7/14/30/90D velocity toggles, case-pack & MOQ rounding."}
                     </Text>
                   </BlockStack>
 
@@ -452,6 +483,32 @@ export default function SettingsPage() {
                     💬 Contact Support
                   </Button>
                 </InlineStack>
+
+                <Divider />
+
+                <BlockStack gap="200">
+                  <Text as="p" variant="bodyMd" fontWeight="semibold">
+                    Change Subscription Tier
+                  </Text>
+                  <InlineStack gap="300" blockAlign="center" wrap>
+                    <div style={{ flex: 1, minWidth: "260px" }}>
+                      <Select
+                        label="Plan Tier"
+                        labelHidden
+                        options={[
+                          { label: "Starter Plan — $9/mo (Max 50 SKUs, 1 Supplier, 30D Velocity)", value: "starter" },
+                          { label: "Growth Plan — $39/mo (Unlimited SKUs, Multi-Supplier, 7/14/30/90D Velocity)", value: "growth" },
+                          { label: "Scale Plan — $89/mo (Multi-Warehouse Receiving, Custom Safety Formulas)", value: "scale" },
+                        ]}
+                        value={currentPlan}
+                        onChange={(val) => {
+                          setCurrentPlan(val);
+                          submit({ intent: "CHANGE_PLAN", plan: val }, { method: "post" });
+                        }}
+                      />
+                    </div>
+                  </InlineStack>
+                </BlockStack>
               </BlockStack>
             </Card>
           </Layout.AnnotatedSection>
@@ -500,13 +557,36 @@ export default function SettingsPage() {
                   </div>
                 </InlineStack>
 
+                <Select
+                  label="Custom Safety Stock Formula Model"
+                  disabled={settings.selectedPlan !== "scale"}
+                  options={[
+                    { label: "Standard Formula (1.0x buffer — Daily Sales × Target Days)", value: "standard" },
+                    { label: "Surge Protection Buffer (+25% multiplier for volatile sales)", value: "surge" },
+                    { label: "Aggressive Peak Buffer (+50% multiplier for zero-stockout policy)", value: "aggressive" },
+                    { label: "Lean / JIT Inventory (-20% buffer for fast inventory turnover)", value: "lean" },
+                  ]}
+                  value={settings.selectedPlan === "scale" ? safetyFormulaModel : "standard"}
+                  onChange={setSafetyFormulaModel}
+                  helpText={
+                    settings.selectedPlan === "scale"
+                      ? "Scale Plan feature: Dynamically scales baseline safety stock and reorder triggers based on your risk tolerance."
+                      : "🔒 Available on Scale Plan ($89/mo). Upgrade from Starter or Growth to enable Surge (+25%), Aggressive (+50%), and Lean (-20%) formula models."
+                  }
+                />
+
                 <Divider />
 
                 <Checkbox
                   label="Automatically round replenishment orders to Case Pack multiples"
-                  checked={autoRound}
+                  disabled={settings.selectedPlan === "starter"}
+                  checked={settings.selectedPlan === "starter" ? false : autoRound}
                   onChange={setAutoRound}
-                  helpText="When enabled, replenishment quantities round up to carton multiples (e.g., 12, 24) to avoid broken master cases."
+                  helpText={
+                    settings.selectedPlan === "starter"
+                      ? "🔒 Case Pack & MOQ Rounding is a Growth Plan feature ($39/mo). Upgrade to automatically round orders to master carton multiples."
+                      : "When enabled, replenishment quantities round up to carton multiples (e.g., 12, 24) to avoid broken master cases."
+                  }
                 />
               </BlockStack>
             </Card>
@@ -768,6 +848,7 @@ export default function SettingsPage() {
         isOpen={showSupportModal}
         onClose={() => setShowSupportModal(false)}
         shop={loaderData.shop}
+        plan={settings.selectedPlan}
       />
 
       {/* Guide Playbook Modal */}

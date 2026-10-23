@@ -200,6 +200,7 @@ model AppSettings {
   alertEmail             String?
   onboardingCompleted    Boolean  @default(false)
   selectedPlan           String   @default("growth")
+  safetyFormulaModel     String   @default("standard") // standard, surge (+25%), aggressive (+50%), lean (-20%)
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
